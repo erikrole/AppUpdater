@@ -21,16 +21,16 @@ updater.checkOnLaunch()
 updater.checkNow()
 ```
 
-Optional configuration:
+Optional configuration (all have defaults):
 - `style: .init(accentColor:, kickerColor:, icon:, title:, primaryButtonTitle:)` dresses the window in the host's colours
   (default: system accent). The primary button is a filled accent pill; Later and Skip are quiet text buttons.
+- `busyReason: { model.isCopying ? "Offload is busy with a copy." : nil }` holds the update back and shows the reason.
+  It is checked before the download and again right before the swap.
 - `fallbackNotes: "…"` is shown when a release has no notes and none were cached from an earlier fetch. Notes are cached
   per version in `~/Library/Caches/AppUpdater/<bundle id>/`, so the window is never empty.
-- `updater.isInstalling` lets `applicationShouldTerminate` avoid quitting mid-install.
-- `busyReason` (below) is rechecked right before the swap.
-
-Also: `busyReason: { model.isCopying ? "Offload is busy with a copy." : nil }` holds the update
-back (the window shows the reason), `minimumCheckInterval` (default 6 hours), `teamID`, `displayName`, `bundleIdentifier`.
+- `minimumCheckInterval` (default 6 hours), `teamID` (default `T26T3G8C7Q`), `displayName`, `bundleIdentifier`, `appURL`.
+- `updater.isInstalling` lets `applicationShouldTerminate` avoid quitting mid-install. Keep the `AppUpdater` instance
+  alive for the life of the app (a property on your app delegate).
 
 Preview the window: `swift run UpdaterPreview`.
 
@@ -39,7 +39,8 @@ Preview the window: `swift run UpdaterPreview`.
 - **Launch check:** at most once per 6 hours, silent when current, offline, or the version was skipped.
   The menu item always checks and says "up to date" or "couldn't check".
 - **Splash:** app icon, version change, release date, release notes rendered from the GitHub release body
-  (headings, bullets, bold, code, links). Buttons: Update and Relaunch, Later, Skip This Version.
+  (headings, bullets, nested bullets, numbered lists, bold, code and code blocks, links) in a scrolling card with a
+  "View on GitHub" link. Buttons: Update and Relaunch, Later (Cancel while downloading), Skip This Version.
 - **Install:** download with progress, mount read-only, copy the app next to the installed one, verify
   (`codesign --verify --deep --strict`, Team ID `T26T3G8C7Q`, bundle ID, `spctl --assess`), swap with a hidden backup,
   then quit. A detached helper waits for the old process to exit, opens the new app as a new instance and deletes the
@@ -54,7 +55,24 @@ Preview the window: `swift run UpdaterPreview`.
 
 The release body is the splash content. Start with a `## headline`, then bullets: `- **What changed.** Why it matters.`
 
+## Release notes tooling
+
+The scripts live in this repo's `scripts/`; call them by path from a checkout of AppUpdater (or copy them into the app's repo).
+
+The splash shows the GitHub release body, so release scripts should generate it and refuse to publish an empty one.
+
+```sh
+scripts/release-notes.sh > notes.md          # commits since the last tag → "## headline" + "- **Subject.** body" bullets
+scripts/release-notes.sh --since v1.5.2 --headline "Fetch now updates itself" > notes.md
+scripts/check-notes.sh notes.md              # exit 1 if empty, heading-only, too short or a TODO/TBD placeholder
+scripts/check-notes.sh --release erikrole/fetch-releases v1.5.3   # same check on a published release (needs gh)
+gh release create v1.5.3 Fetch.dmg --notes-file notes.md
+```
+
+Edit the generated file before publishing: commit subjects are a starting point, not the final wording.
+`scripts/test-release-notes.sh` tests both scripts in a scratch git repo.
+
 ## Tests
 
-`swift test` (offline). `APPUPDATER_LIVE=1 swift test` also downloads the real Offload release and runs the full
+`swift test` (offline) and `scripts/test-release-notes.sh`. `APPUPDATER_LIVE=1 swift test` also downloads the real Offload release and runs the full
 verify path against it.
