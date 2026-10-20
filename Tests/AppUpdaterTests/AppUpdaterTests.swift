@@ -169,3 +169,74 @@ final class RendererTests: XCTestCase {
         XCTAssertEqual(text, "Faster\n•  One bold thing\n•  Two")
     }
 }
+
+final class NotesTests: XCTestCase {
+    func testSectionsSplitHeadlineTitlesAndBullets() {
+        let parsed = ReleaseNotesSections(markdown: "## Faster naming\n- One\n- Two\n### Fixes\n- Three\nPlain line")
+        XCTAssertEqual(parsed.headline, "Faster naming")
+        XCTAssertEqual(parsed.sections.count, 2)
+        XCTAssertNil(parsed.sections[0].title)
+        XCTAssertEqual(parsed.sections[0].items, ["One", "Two"])
+        XCTAssertEqual(parsed.sections[1].title, "Fixes")
+        XCTAssertEqual(parsed.sections[1].items, ["Three", "Plain line"])
+    }
+
+    func testPlainParagraphIsNotBulleted() {
+        let parsed = ReleaseNotesSections(markdown: "Just fixes.")
+        XCTAssertNil(parsed.headline)
+        XCTAssertEqual(parsed.sections, [.init(title: nil, items: ["Just fixes."], isBullets: false)])
+    }
+
+    @MainActor
+    func testNotesNeverEmptyAndFallBackInOrder() throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "AppUpdaterNotes-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let defaults = UserDefaults(suiteName: "AppUpdaterTests-\(UUID().uuidString)")!
+        var configuration = AppUpdater.Configuration(repository: "a/b", assetName: "A.dmg", bundleIdentifier: "com.x.A", currentVersion: "1.0")
+        let updater = AppUpdater(configuration, defaults: defaults)
+        try? FileManager.default.removeItem(at: updater.notesCache.directory)
+        let release = ReleaseInfo(version: "2.0", notes: "", downloadURL: URL(string: "https://github.com/a/b")!)
+        let withNotes = ReleaseInfo(version: "2.0", notes: "- Real notes", downloadURL: release.downloadURL)
+        XCTAssertEqual(updater.resolvedNotes(for: release), "Improvements and fixes.")
+
+        configuration.fallbackNotes = "Host notes"
+        let hosted = AppUpdater(configuration, defaults: defaults)
+        XCTAssertEqual(hosted.resolvedNotes(for: release), "Host notes")
+
+        // Once real notes were seen, they win over the host fallback when a later fetch has none.
+        XCTAssertEqual(hosted.resolvedNotes(for: withNotes), "- Real notes")
+        XCTAssertEqual(hosted.resolvedNotes(for: release), "- Real notes")
+        try? FileManager.default.removeItem(at: hosted.notesCache.directory)
+    }
+
+    func testCacheRoundTrip() {
+        let base = FileManager.default.temporaryDirectory.appending(path: "AppUpdaterCache-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let cache = NotesCache(bundleIdentifier: "com.x.A", base: base)
+        XCTAssertNil(cache.load(version: "1.0"))
+        cache.save("hello", version: "1.0")
+        XCTAssertEqual(cache.load(version: "1.0"), "hello")
+        XCTAssertNil(cache.load(version: "1.1"))
+    }
+}
+
+@MainActor
+final class WindowTests: XCTestCase {
+    func testWindowBuildsWithAndWithoutStyleAndEmptyNotes() {
+        _ = NSApplication.shared
+        for style in [AppUpdater.Style(), AppUpdater.Style(accentColor: .systemRed, title: { _, _ in "Custom" }, primaryButtonTitle: "Go")] {
+            let updater = AppUpdater(
+                .init(repository: "a/b", assetName: "A.dmg", bundleIdentifier: "com.x.A", currentVersion: "1.0", style: style),
+                defaults: UserDefaults(suiteName: "AppUpdaterTests-\(UUID().uuidString)")!
+            )
+            for notes in ["", "## Head\n- **a** b\n### More\n- c", "no markdown at all"] {
+                let release = ReleaseInfo(version: "2.0", notes: notes, downloadURL: URL(string: "https://github.com/a/b")!)
+                for mode in [UpdateWindowController.Mode.available(release), .updated(release)] {
+                    let controller = UpdateWindowController(mode: mode, updater: updater)
+                    XCTAssertGreaterThan(controller.window?.contentView?.fittingSize.height ?? 0, 100)
+                    controller.window?.close()
+                }
+            }
+        }
+    }
+}

@@ -27,7 +27,7 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         self.mode = mode
         self.updater = updater
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 600),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered, defer: false
         )
@@ -39,7 +39,11 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         window.level = .floating
         super.init(window: window)
         window.delegate = self
-        window.contentView = buildContent()
+        let content = buildContent()
+        window.contentView = content
+        content.widthAnchor.constraint(equalToConstant: 500).isActive = true
+        content.layoutSubtreeIfNeeded()
+        window.setContentSize(NSSize(width: 500, height: max(content.fittingSize.height, 380)))
         window.center()
     }
 
@@ -58,6 +62,9 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - Layout
 
+    private var style: AppUpdater.Style { updater.configuration.style }
+    private var accent: NSColor { style.accentColor ?? .controlAccentColor }
+
     private func buildContent() -> NSView {
         let release = mode.release
         let name = updater.configuration.displayName
@@ -68,67 +75,73 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         background.material = .underWindowBackground
         background.state = .active
 
-        let icon = NSImageView(image: NSApp.applicationIconImage)
+        let icon = NSImageView(image: style.icon ?? NSApp.applicationIconImage)
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.translatesAutoresizingMaskIntoConstraints = false
-        icon.widthAnchor.constraint(equalToConstant: 72).isActive = true
-        icon.heightAnchor.constraint(equalToConstant: 72).isActive = true
+        icon.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 64).isActive = true
+        icon.setAccessibilityLabel("\(name) icon")
 
         let kicker = NSTextField(labelWithString: isUpdated ? "UPDATED" : "UPDATE AVAILABLE")
         kicker.font = .systemFont(ofSize: 11, weight: .semibold)
-        kicker.textColor = .controlAccentColor
-        let title = NSTextField(labelWithString: isUpdated ? "\(name) is now \(release.version)." : "\(name) \(release.version) is ready.")
-        title.font = .systemFont(ofSize: 24, weight: .bold)
-        title.lineBreakMode = .byWordWrapping
+        kicker.textColor = style.kickerColor ?? accent
+        let defaultTitle = isUpdated ? "\(name) is now \(release.version)." : "\(name) \(release.version) is ready."
+        let title = NSTextField(wrappingLabelWithString: style.title?(release, isUpdated) ?? defaultTitle)
+        title.font = .systemFont(ofSize: 22, weight: .bold)
         title.maximumNumberOfLines = 2
-        let subtitle = NSTextField(labelWithString: subtitleText(isUpdated: isUpdated))
+        let subtitle = NSTextField(wrappingLabelWithString: subtitleText(isUpdated: isUpdated))
         subtitle.font = .systemFont(ofSize: 13)
         subtitle.textColor = .secondaryLabelColor
-        subtitle.lineBreakMode = .byWordWrapping
-        subtitle.maximumNumberOfLines = 2
 
         let headline = NSStackView(views: [kicker, title, subtitle])
         headline.orientation = .vertical
         headline.alignment = .leading
-        headline.spacing = 4
+        headline.spacing = 3
         let header = NSStackView(views: [icon, headline])
         header.orientation = .horizontal
         header.alignment = .centerY
         header.spacing = 16
 
-        let notesHeading = NSTextField(labelWithString: "What's new")
-        notesHeading.font = .systemFont(ofSize: 13, weight: .semibold)
-        let notes = notesView(release)
+        let notes = notesView(for: release)
 
-        configure(updateButton, title: isUpdated ? "Continue" : "Update and Relaunch", action: #selector(updateTapped), primary: true)
+        configure(updateButton, title: style.primaryButtonTitle ?? (isUpdated ? "Continue" : "Update and Relaunch"), action: #selector(updateTapped), primary: true)
         configure(laterButton, title: "Later", action: #selector(laterTapped))
         configure(skipButton, title: "Skip This Version", action: #selector(skipTapped))
-        skipButton.isBordered = false
-        skipButton.contentTintColor = .secondaryLabelColor
+        for quiet in [laterButton, skipButton] {
+            quiet.isBordered = false
+            quiet.contentTintColor = .secondaryLabelColor
+            quiet.controlSize = .regular
+            quiet.font = .systemFont(ofSize: 13)
+        }
         laterButton.keyEquivalent = "\u{1b}"
+        updateButton.setAccessibilityLabel(updateButton.title)
 
         progress.style = .bar
         progress.isIndeterminate = false
         progress.minValue = 0
         progress.maxValue = 1
         progress.isHidden = true
+        progress.setAccessibilityLabel("Update progress")
         statusLabel.font = .systemFont(ofSize: 12)
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.lineBreakMode = .byWordWrapping
         statusLabel.maximumNumberOfLines = 3
         statusLabel.isHidden = true
+        statusLabel.setAccessibilityRole(.staticText)
 
         let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let buttons = NSStackView(views: isUpdated ? [spacer, updateButton] : [skipButton, spacer, laterButton, updateButton])
         buttons.orientation = .horizontal
-        buttons.spacing = 10
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        buttons.alignment = .centerY
+        buttons.spacing = 14
 
-        let stack = NSStackView(views: [header, notesHeading, notes, progress, statusLabel, buttons])
+        let stack = NSStackView(views: [header, notes, progress, statusLabel, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 14
-        stack.setCustomSpacing(20, after: header)
+        stack.setCustomSpacing(18, after: header)
+        stack.setCustomSpacing(20, after: statusLabel)
         stack.translatesAutoresizingMaskIntoConstraints = false
         background.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -140,6 +153,7 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
             progress.widthAnchor.constraint(equalTo: stack.widthAnchor),
             buttons.widthAnchor.constraint(equalTo: stack.widthAnchor),
             statusLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            headline.trailingAnchor.constraint(lessThanOrEqualTo: stack.trailingAnchor),
         ])
         return background
     }
@@ -149,41 +163,113 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         var parts: [String] = []
         if !isUpdated { parts.append("You have \(updater.configuration.currentVersion).") }
         if let date = release.date { parts.append("Released \(date.formatted(date: .long, time: .omitted)).") }
-        if !isUpdated { parts.append("Updating takes a moment and \(updater.configuration.displayName) relaunches by itself.") }
+        if !isUpdated { parts.append("It installs in a moment and \(updater.configuration.displayName) reopens by itself.") }
         return parts.joined(separator: " ")
     }
 
-    private func notesView(_ release: ReleaseInfo) -> NSView {
-        let text = NSTextView()
-        text.isEditable = false
-        text.drawsBackground = false
-        text.textContainerInset = NSSize(width: 12, height: 10)
-        text.isVerticallyResizable = true
-        text.isHorizontallyResizable = false
-        text.autoresizingMask = [.width]
-        text.textContainer?.widthTracksTextView = true
-        if release.notes.isEmpty {
-            text.textStorage?.setAttributedString(NSAttributedString(
-                string: "Improvements and fixes.",
-                attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor]
-            ))
+    /// Version header, then each section of the release notes as a titled list, in a scrolling card.
+    private func notesView(for release: ReleaseInfo) -> NSView {
+        let parsed = ReleaseNotesSections(markdown: updater.resolvedNotes(for: release))
+
+        let content = NSStackView()
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 6
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        let versionLabel = NSTextField(labelWithString: "Version \(release.version)")
+        versionLabel.font = .systemFont(ofSize: 11, weight: .semibold)
+        versionLabel.textColor = .secondaryLabelColor
+        content.addArrangedSubview(versionLabel)
+        if let headline = parsed.headline {
+            let label = NSTextField(wrappingLabelWithString: headline)
+            label.font = .systemFont(ofSize: 16, weight: .semibold)
+            content.addArrangedSubview(label)
+            content.setCustomSpacing(12, after: label)
         } else {
-            text.textStorage?.setAttributedString(ReleaseNotesRenderer.render(release.notes))
+            content.setCustomSpacing(10, after: versionLabel)
         }
+
+        for section in parsed.sections {
+            if let title = section.title {
+                let label = NSTextField(wrappingLabelWithString: title)
+                label.font = .systemFont(ofSize: 13, weight: .semibold)
+                label.textColor = .secondaryLabelColor
+                if let last = content.arrangedSubviews.last { content.setCustomSpacing(14, after: last) }
+                content.addArrangedSubview(label)
+            }
+            for item in section.items {
+                let row = noteRow(item, bullet: section.isBullets)
+                content.addArrangedSubview(row)
+                row.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+            }
+        }
+
+        let document = FlippedView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 16),
+            content.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -16),
+            content.topAnchor.constraint(equalTo: document.topAnchor, constant: 14),
+            content.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -14),
+        ])
+
         let scroll = NSScrollView()
-        scroll.documentView = text
+        scroll.documentView = document
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
+        scroll.borderType = .noBorder
         scroll.wantsLayer = true
-        scroll.layer?.cornerRadius = 10
+        scroll.layer?.cornerRadius = 12
         scroll.layer?.borderWidth = 1
         scroll.layer?.borderColor = NSColor.separatorColor.cgColor
-        scroll.layer?.backgroundColor = NSColor.textBackgroundColor.withAlphaComponent(0.5).cgColor
+        scroll.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.6).cgColor
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
+        scroll.setAccessibilityLabel("Release notes for version \(release.version)")
+        let clip = scroll.contentView
+        document.widthAnchor.constraint(equalTo: clip.widthAnchor).isActive = true
+        let natural = scroll.heightAnchor.constraint(equalTo: document.heightAnchor)
+        natural.priority = .defaultHigh
+        natural.isActive = true
+        scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
+        scroll.heightAnchor.constraint(lessThanOrEqualToConstant: 340).isActive = true
         scroll.setContentHuggingPriority(.defaultLow, for: .vertical)
         return scroll
+    }
+
+    private func noteRow(_ markdown: String, bullet: Bool) -> NSView {
+        let font = NSFont.systemFont(ofSize: 13)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 2
+        let text = NSTextField(wrappingLabelWithString: "")
+        text.attributedStringValue = ReleaseNotesRenderer.inline(markdown, font: font, color: .labelColor, style: paragraph)
+        text.isSelectable = true
+        text.allowsEditingTextAttributes = true
+        text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        guard bullet else { return text }
+        let dot = NSView()
+        dot.wantsLayer = true
+        dot.layer?.backgroundColor = accent.cgColor
+        dot.layer?.cornerRadius = 3
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        dot.widthAnchor.constraint(equalToConstant: 6).isActive = true
+        dot.heightAnchor.constraint(equalToConstant: 6).isActive = true
+        let dotColumn = NSView()
+        dotColumn.translatesAutoresizingMaskIntoConstraints = false
+        dotColumn.addSubview(dot)
+        NSLayoutConstraint.activate([
+            dotColumn.widthAnchor.constraint(equalToConstant: 6),
+            dot.leadingAnchor.constraint(equalTo: dotColumn.leadingAnchor),
+            dot.topAnchor.constraint(equalTo: dotColumn.topAnchor, constant: 6),
+            dotColumn.heightAnchor.constraint(greaterThanOrEqualToConstant: 12),
+        ])
+        let row = NSStackView(views: [dotColumn, text])
+        row.orientation = .horizontal
+        row.alignment = .top
+        row.spacing = 10
+        return row
     }
 
     private func configure(_ button: NSButton, title: String, action: Selector, primary: Bool = false) {
@@ -192,7 +278,20 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         button.action = action
         button.bezelStyle = .rounded
         button.controlSize = .large
-        if primary { button.keyEquivalent = "\r" }
+        if primary {
+            button.keyEquivalent = "\r"
+            // A filled accent pill that looks the same whether or not the window is key.
+            button.isBordered = false
+            button.wantsLayer = true
+            button.layer?.backgroundColor = accent.cgColor
+            button.layer?.cornerRadius = 9
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.heightAnchor.constraint(equalToConstant: 34).isActive = true
+            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 168).isActive = true
+            button.attributedTitle = NSAttributedString(
+                string: title, attributes: [.foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)]
+            )
+        }
     }
 
     // MARK: - Actions
@@ -226,7 +325,7 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
             } catch {
                 setWorking(false, status: error.localizedDescription)
                 statusLabel.textColor = .systemOrange
-                updateButton.title = "Try Again"
+                updateButton.attributedTitle = NSAttributedString(string: "Try Again", attributes: [.foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
             }
         }
     }
@@ -244,4 +343,9 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         laterButton.isEnabled = !value
         skipButton.isEnabled = !value
     }
+}
+
+/// A top-left-origin container, so scrolled content starts at the top.
+private final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
 }

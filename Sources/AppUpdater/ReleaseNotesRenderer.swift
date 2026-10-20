@@ -55,7 +55,7 @@ enum ReleaseNotesRenderer {
 
     /// Bold, italics, code and links inside one line.
     @MainActor
-    private static func inline(_ text: String, font: NSFont, color: NSColor, style: NSParagraphStyle) -> NSAttributedString {
+    static func inline(_ text: String, font: NSFont, color: NSColor, style: NSParagraphStyle) -> NSAttributedString {
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnly)
         guard let parsed = try? AttributedString(markdown: text, options: options) else {
             return NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: color, .paragraphStyle: style])

@@ -9,7 +9,35 @@ import Foundation
 ///     updater.checkNow()               // "Check for Updates…" menu item
 @MainActor
 public final class AppUpdater {
-    public struct Configuration: Sendable {
+    /// Lets the host app dress the window in its own colours. Every field is optional; the defaults follow the system.
+    public struct Style: @unchecked Sendable {
+        /// Fill of the primary button and tint of the bullets. Default: the system accent colour.
+        public var accentColor: NSColor?
+        /// Colour of the small "UPDATE AVAILABLE" label. Default: `accentColor`.
+        public var kickerColor: NSColor?
+        /// Shown at the top of the window. Default: the app's icon.
+        public var icon: NSImage?
+        /// Replaces the headline ("Offload 1.5.3 is ready.") when it returns a string.
+        public var title: (@MainActor @Sendable (_ release: ReleaseInfo, _ justUpdated: Bool) -> String?)?
+        /// Replaces the primary button title ("Update and Relaunch").
+        public var primaryButtonTitle: String?
+
+        public init(
+            accentColor: NSColor? = nil,
+            kickerColor: NSColor? = nil,
+            icon: NSImage? = nil,
+            title: (@MainActor @Sendable (_ release: ReleaseInfo, _ justUpdated: Bool) -> String?)? = nil,
+            primaryButtonTitle: String? = nil
+        ) {
+            self.accentColor = accentColor
+            self.kickerColor = kickerColor
+            self.icon = icon
+            self.title = title
+            self.primaryButtonTitle = primaryButtonTitle
+        }
+    }
+
+    public struct Configuration: @unchecked Sendable {
         /// `owner/name` of the public releases repository.
         public var repository: String
         /// The stable disk image name on each release, e.g. "Offload.dmg". A versioned `Offload-1.5.3.dmg` is preferred when present.
@@ -26,6 +54,9 @@ public final class AppUpdater {
         public var currentVersion: String
         /// Return a reason (shown in the window) to hold an update back, such as "A copy is in progress."
         public var busyReason: @MainActor @Sendable () -> String?
+        public var style: Style
+        /// Shown when a release has no notes and none were cached from an earlier fetch.
+        public var fallbackNotes: String?
 
         public init(
             repository: String,
@@ -37,8 +68,12 @@ public final class AppUpdater {
                 ?? Bundle.main.bundleURL.deletingPathExtension().lastPathComponent,
             minimumCheckInterval: TimeInterval = 6 * 3600,
             currentVersion: String = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0",
-            busyReason: @escaping @MainActor @Sendable () -> String? = { nil }
+            busyReason: @escaping @MainActor @Sendable () -> String? = { nil },
+            style: Style = Style(),
+            fallbackNotes: String? = nil
         ) {
+            self.style = style
+            self.fallbackNotes = fallbackNotes
             self.repository = repository
             self.assetName = assetName
             self.bundleIdentifier = bundleIdentifier
@@ -63,12 +98,14 @@ public final class AppUpdater {
     let defaults: UserDefaults
     /// Fetches the latest-release JSON. Replaced in tests.
     var fetch: @Sendable (URL) async throws -> (Data, Int)
+    let notesCache: NotesCache
     private var window: UpdateWindowController?
     private var checking = false
 
     public init(_ configuration: Configuration, defaults: UserDefaults = .standard) {
         self.configuration = configuration
         self.defaults = defaults
+        self.notesCache = NotesCache(bundleIdentifier: configuration.bundleIdentifier)
         self.fetch = { url in
             var request = URLRequest(url: url, timeoutInterval: 12)
             request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
@@ -134,6 +171,19 @@ public final class AppUpdater {
         } catch {
             return .failed(error.localizedDescription)
         }
+    }
+
+    /// Notes to show: the release's own, else the last ones cached for that version, else the host's fallback,
+    /// else a short generic line. Never empty.
+    func resolvedNotes(for release: ReleaseInfo) -> String {
+        let notes = release.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !notes.isEmpty {
+            notesCache.save(notes, version: release.version)
+            return notes
+        }
+        if let cached = notesCache.load(version: release.version) { return cached }
+        if let fallback = configuration.fallbackNotes?.trimmingCharacters(in: .whitespacesAndNewlines), !fallback.isEmpty { return fallback }
+        return "Improvements and fixes."
     }
 
     func skip(_ release: ReleaseInfo) { defaults.set(release.version, forKey: Keys.skipped) }

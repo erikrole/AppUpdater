@@ -8,7 +8,8 @@ app.setActivationPolicy(.regular)
 @MainActor final class Delegate: NSObject, NSApplicationDelegate {
     let updater = AppUpdater(.init(
         repository: "erikrole/offload-releases", assetName: "Offload.dmg",
-        bundleIdentifier: "com.erole.Offload", displayName: "Offload", currentVersion: "1.5.2"
+        bundleIdentifier: "com.erole.Offload", displayName: "Offload", currentVersion: "1.5.2",
+        style: .init(accentColor: CommandLine.arguments.contains("--red") ? NSColor(red: 0.82, green: 0.1, blue: 0.1, alpha: 1) : nil)
     ))
 
     func applicationDidFinishLaunching(_ notification: Notification) {
