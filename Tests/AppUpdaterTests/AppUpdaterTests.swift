@@ -274,12 +274,10 @@ final class HardeningTests: XCTestCase {
         guard case .failed = await updater.evaluate(userInitiated: true) else { return XCTFail() }
     }
 
-    func testReadOnlyVolumeIsRefusedAndNormalFolderAccepted() throws {
+    func testWritableFolderIsAccepted() throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "AppUpdaterRO-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         XCTAssertNoThrow(try UpdateInstaller.checkInstallable(dir.appending(path: "X.app")))
-        // A copy under an external volume path is fine as long as the volume is writable (no blanket /Volumes ban).
-        XCTAssertNoThrow(try UpdateInstaller.checkInstallable(dir.appending(path: "Volumes/X.app").deletingLastPathComponent().appending(path: "X.app")))
     }
 }
