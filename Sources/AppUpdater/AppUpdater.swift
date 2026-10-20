@@ -120,6 +120,7 @@ public final class AppUpdater {
     /// Call once at launch. Shows what's new if the app was just updated; otherwise checks quietly, at most
     /// once per `minimumCheckInterval`, and only opens a window when there's an update.
     public func checkOnLaunch() {
+        UpdateInstaller.sweepLeftovers(for: configuration.appURL)
         if showJustUpdated() { return }
         Task { await check(userInitiated: false) }
     }
@@ -156,13 +157,14 @@ public final class AppUpdater {
            now.timeIntervalSince(last) < configuration.minimumCheckInterval {
             return .tooSoon
         }
-        guard let url = URL(string: "https://api.github.com/repos/\(configuration.repository)/releases/latest") else {
+        guard configuration.repository.range(of: #"^[\w.-]+/[\w.-]+$"#, options: .regularExpression) != nil,
+              let url = URL(string: "https://api.github.com/repos/\(configuration.repository)/releases/latest") else {
             return .failed("Bad repository name.")
         }
         do {
             let (data, status) = try await fetch(url)
             guard status == 200, let release = ReleaseInfo.parse(data, assetName: configuration.assetName) else {
-                return .failed("GitHub returned status \(status).")
+                return .failed(status == 200 ? "Couldn't read the release." : "GitHub returned status \(status).")
             }
             defaults.set(now, forKey: Keys.lastCheck)
             guard ReleaseInfo.isNewer(release.version, than: configuration.currentVersion) else { return .upToDate }
@@ -238,19 +240,36 @@ public final class AppUpdater {
 
     // MARK: - Install
 
-    /// Downloads, verifies, swaps and relaunches. Progress is 0…1 for the download; `status` names later steps.
+    /// True from the moment an install starts until the app quits or the install fails. Hosts can consult this
+    /// in `applicationShouldTerminate`.
+    public private(set) var isInstalling = false
+
+    /// Downloads, verifies, swaps in the new app and asks this one to quit. A detached helper opens the new app
+    /// once this process has exited and removes the backup; if the new app won't open, it restores the old one.
+    /// Progress is 0…1 for the download; `status` names later steps. Cancelling the task cancels the download.
     func install(
         _ release: ReleaseInfo,
         progress: @escaping @MainActor (Double) -> Void,
         status: @escaping @MainActor (String) -> Void
     ) async throws {
+        guard !isInstalling else { return }
         if let reason = configuration.busyReason() { throw UpdateInstaller.Failure(message: reason) }
+        isInstalling = true
+        var finishedHandOff = false
+        defer { if !finishedHandOff { isInstalling = false } }
+
         let destination = configuration.appURL
         let configuration = configuration
         let prepared = try await UpdateInstaller.prepare(release: release, destination: destination, configuration: configuration) { fraction in
             Task { @MainActor in progress(fraction) }
         }
         defer { try? FileManager.default.removeItem(at: prepared.workDirectory) }
+
+        // The download can take minutes; the app may have started something since.
+        if let reason = configuration.busyReason() {
+            try? FileManager.default.removeItem(at: prepared.staged)
+            throw UpdateInstaller.Failure(message: reason)
+        }
         status("Installing…")
         let backup: URL
         do {
@@ -260,17 +279,18 @@ public final class AppUpdater {
             throw error
         }
         rememberInstall(of: release)
-        status("Relaunching…")
         do {
-            try await UpdateInstaller.relaunch(destination)
+            try UpdateInstaller.scheduleRelaunch(destination: destination, backup: backup)
         } catch {
             UpdateInstaller.rollback(destination: destination, backup: backup)
             defaults.removeObject(forKey: Keys.justUpdated)
-            throw UpdateInstaller.Failure(message: "The update installed but wouldn't open, so the previous version was restored. \(error.localizedDescription)")
+            throw UpdateInstaller.Failure(message: "Couldn't finish the update, so the previous version was kept. \(error.localizedDescription)")
         }
-        try? FileManager.default.removeItem(at: backup)
+        finishedHandOff = true
+        status("Relaunching…")
         NSApp.terminate(nil)
-        // This copy has already been replaced on disk. If the normal quit is held up, don't leave two apps open.
-        DispatchQueue.global().asyncAfter(deadline: .now() + 8) { exit(0) }
+        // Still here: the app asked to finish something first (a save sheet, say). The helper waits for it to quit,
+        // then opens the new version, so there is nothing more to do but say so.
+        status("Finish up in \(configuration.displayName). The update opens as soon as it quits.")
     }
 }

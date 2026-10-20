@@ -15,13 +15,16 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
 
     var onClose: (() -> Void)?
     private let mode: Mode
-    private unowned let updater: AppUpdater
+    private let updater: AppUpdater
     private let progress = NSProgressIndicator()
     private let statusLabel = NSTextField(labelWithString: "")
-    private let updateButton = NSButton()
+    private let updateButton = FilledButton()
     private let laterButton = NSButton()
     private let skipButton = NSButton()
     private var working = false
+    private var installing = false
+    private var installTask: Task<Void, Never>?
+    private let viewButton = NSButton()
 
     init(mode: Mode, updater: AppUpdater) {
         self.mode = mode
@@ -36,8 +39,7 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         window.isMovableByWindowBackground = true
         window.standardWindowButton(.miniaturizeButton)?.isHidden = true
         window.standardWindowButton(.zoomButton)?.isHidden = true
-        window.level = .floating
-        super.init(window: window)
+                super.init(window: window)
         window.delegate = self
         let content = buildContent()
         window.contentView = content
@@ -58,7 +60,13 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) { onClose?() }
 
-    func windowShouldClose(_ sender: NSWindow) -> Bool { !working }
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        // A download can be abandoned by closing; once the new app is being put in place, wait.
+        if working, !installing { installTask?.cancel(); return false }
+        return !installing
+    }
+
+    override func cancelOperation(_ sender: Any?) { laterTapped() }
 
     // MARK: - Layout
 
@@ -114,6 +122,11 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
             quiet.font = .systemFont(ofSize: 13)
         }
         laterButton.keyEquivalent = "\u{1b}"
+        configure(viewButton, title: "View on GitHub", action: #selector(viewTapped))
+        viewButton.isBordered = false
+        viewButton.contentTintColor = .secondaryLabelColor
+        viewButton.font = .systemFont(ofSize: 13)
+        viewButton.isHidden = release.pageURL == nil
         updateButton.setAccessibilityLabel(updateButton.title)
 
         progress.style = .bar
@@ -131,7 +144,7 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
 
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let buttons = NSStackView(views: isUpdated ? [spacer, updateButton] : [skipButton, spacer, laterButton, updateButton])
+        let buttons = NSStackView(views: isUpdated ? [spacer, updateButton] : [skipButton, viewButton, spacer, laterButton, updateButton])
         buttons.orientation = .horizontal
         buttons.alignment = .centerY
         buttons.spacing = 14
@@ -215,18 +228,23 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
             content.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -14),
         ])
 
+        let card = NSBox()
+        card.boxType = .custom
+        card.cornerRadius = 12
+        card.borderWidth = 1
+        card.borderColor = .separatorColor
+        card.fillColor = .controlBackgroundColor
+        card.titlePosition = .noTitle
+        card.contentViewMargins = .zero
+        card.translatesAutoresizingMaskIntoConstraints = false
         let scroll = NSScrollView()
         scroll.documentView = document
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
-        scroll.wantsLayer = true
-        scroll.layer?.cornerRadius = 12
-        scroll.layer?.borderWidth = 1
-        scroll.layer?.borderColor = NSColor.separatorColor.cgColor
-        scroll.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.6).cgColor
         scroll.translatesAutoresizingMaskIntoConstraints = false
+        card.contentView = scroll
         scroll.setAccessibilityLabel("Release notes for version \(release.version)")
         let clip = scroll.contentView
         document.widthAnchor.constraint(equalTo: clip.widthAnchor).isActive = true
@@ -235,8 +253,8 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         natural.isActive = true
         scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
         scroll.heightAnchor.constraint(lessThanOrEqualToConstant: 340).isActive = true
-        scroll.setContentHuggingPriority(.defaultLow, for: .vertical)
-        return scroll
+        card.setContentHuggingPriority(.defaultLow, for: .vertical)
+        return card
     }
 
     private func noteRow(_ markdown: String, bullet: Bool) -> NSView {
@@ -249,10 +267,7 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         text.allowsEditingTextAttributes = true
         text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         guard bullet else { return text }
-        let dot = NSView()
-        dot.wantsLayer = true
-        dot.layer?.backgroundColor = accent.cgColor
-        dot.layer?.cornerRadius = 3
+        let dot = DotView(color: accent)
         dot.translatesAutoresizingMaskIntoConstraints = false
         dot.widthAnchor.constraint(equalToConstant: 6).isActive = true
         dot.heightAnchor.constraint(equalToConstant: 6).isActive = true
@@ -282,9 +297,7 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
             button.keyEquivalent = "\r"
             // A filled accent pill that looks the same whether or not the window is key.
             button.isBordered = false
-            button.wantsLayer = true
-            button.layer?.backgroundColor = accent.cgColor
-            button.layer?.cornerRadius = 9
+            (button as? FilledButton)?.fill = accent
             button.translatesAutoresizingMaskIntoConstraints = false
             button.heightAnchor.constraint(equalToConstant: 34).isActive = true
             button.widthAnchor.constraint(greaterThanOrEqualToConstant: 168).isActive = true
@@ -296,7 +309,14 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - Actions
 
-    @objc private func laterTapped() { window?.close() }
+    @objc private func laterTapped() {
+        if working { if !installing { installTask?.cancel() }; return }
+        window?.close()
+    }
+
+    @objc private func viewTapped() {
+        if let url = mode.release.pageURL { NSWorkspace.shared.open(url) }
+    }
 
     @objc private func skipTapped() {
         updater.skip(mode.release)
@@ -308,21 +328,28 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         guard !working else { return }
         setWorking(true, status: "Downloading…")
         let release = mode.release
-        Task {
+        installTask = Task {
             do {
                 try await updater.install(
                     release,
                     progress: { fraction in
+                        guard fraction >= self.progress.doubleValue else { return }
                         self.progress.doubleValue = fraction
                         self.statusLabel.stringValue = "Downloading… \(Int(fraction * 100))%"
                     },
                     status: { text in
+                        self.installing = true
+                        self.laterButton.isEnabled = false
                         self.progress.isIndeterminate = true
                         self.progress.startAnimation(nil)
                         self.statusLabel.stringValue = text
                     }
                 )
+            } catch is CancellationError {
+                setWorking(false, status: "")
+                statusLabel.isHidden = true
             } catch {
+                installing = false
                 setWorking(false, status: error.localizedDescription)
                 statusLabel.textColor = .systemOrange
                 updateButton.attributedTitle = NSAttributedString(string: "Try Again", attributes: [.foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
@@ -340,12 +367,38 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.stringValue = status
         updateButton.isEnabled = !value
-        laterButton.isEnabled = !value
+        laterButton.isEnabled = true
+        laterButton.title = value ? "Cancel" : "Later"
         skipButton.isEnabled = !value
+        viewButton.isEnabled = !value
     }
 }
 
 /// A top-left-origin container, so scrolled content starts at the top.
 private final class FlippedView: NSView {
     override var isFlipped: Bool { true }
+}
+
+/// A filled pill in the accent colour that re-resolves when the appearance changes.
+private final class FilledButton: NSButton {
+    var fill: NSColor = .controlAccentColor { didSet { needsDisplay = true } }
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() {
+        wantsLayer = true
+        layer?.cornerRadius = 9
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = (isEnabled ? fill : fill.withAlphaComponent(0.45)).cgColor
+        }
+    }
+    override var isEnabled: Bool { didSet { needsDisplay = true } }
+}
+
+private final class DotView: NSView {
+    private let color: NSColor
+    init(color: NSColor) { self.color = color; super.init(frame: .zero) }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+    override func draw(_ dirtyRect: NSRect) {
+        color.setFill()
+        NSBezierPath(ovalIn: bounds).fill()
+    }
 }

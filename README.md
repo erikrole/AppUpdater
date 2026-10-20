@@ -21,7 +21,15 @@ updater.checkOnLaunch()
 updater.checkNow()
 ```
 
-Optional configuration: `busyReason: { model.isCopying ? "Offload is busy with a copy." : nil }` holds the update
+Optional configuration:
+- `style: .init(accentColor:, kickerColor:, icon:, title:, primaryButtonTitle:)` dresses the window in the host's colours
+  (default: system accent). The primary button is a filled accent pill; Later and Skip are quiet text buttons.
+- `fallbackNotes: "…"` is shown when a release has no notes and none were cached from an earlier fetch. Notes are cached
+  per version in `~/Library/Caches/AppUpdater/<bundle id>/`, so the window is never empty.
+- `updater.isInstalling` lets `applicationShouldTerminate` avoid quitting mid-install.
+- `busyReason` (below) is rechecked right before the swap.
+
+Also: `busyReason: { model.isCopying ? "Offload is busy with a copy." : nil }` holds the update
 back (the window shows the reason), `minimumCheckInterval` (default 6 hours), `teamID`, `displayName`, `bundleIdentifier`.
 
 Preview the window: `swift run UpdaterPreview`.
@@ -34,7 +42,10 @@ Preview the window: `swift run UpdaterPreview`.
   (headings, bullets, bold, code, links). Buttons: Update and Relaunch, Later, Skip This Version.
 - **Install:** download with progress, mount read-only, copy the app next to the installed one, verify
   (`codesign --verify --deep --strict`, Team ID `T26T3G8C7Q`, bundle ID, `spctl --assess`), swap with a hidden backup,
-  relaunch as a new instance, delete the backup. If the new app won't open, the previous version is restored.
+  then quit. A detached helper waits for the old process to exit, opens the new app as a new instance and deletes the
+  backup; if the new app won't open it puts the old one back. If the app asks to finish something first (a save sheet),
+  the update waits for it. Leftover staging copies and backups are swept at the next launch. The signature check also
+  requires an Apple-anchored certificate for the Team ID and that the bundle version matches the release tag.
   Nothing is installed unless every check passes.
 - **After updating:** the new version opens once with the same window in "what changed" mode.
 - Refuses to update a copy running from a disk image or a translocated path; asks to move it to Applications.

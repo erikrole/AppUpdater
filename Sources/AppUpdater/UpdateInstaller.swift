@@ -18,15 +18,17 @@ enum UpdateInstaller {
     ) async throws -> (staged: URL, workDirectory: URL) {
         try checkInstallable(destination)
         let fm = FileManager.default
+        sweepLeftovers(for: destination)
         let work = fm.temporaryDirectory.appending(path: "AppUpdater-\(UUID().uuidString)")
         try fm.createDirectory(at: work, withIntermediateDirectories: true)
         do {
             let dmg = work.appending(path: "update.dmg")
             try await Downloader().fetch(release.downloadURL, to: dmg, progress: progress)
+            try Task.checkCancellation()
 
             let mountPoint = work.appending(path: "mount")
             try fm.createDirectory(at: mountPoint, withIntermediateDirectories: true)
-            let attach = try await run("/usr/bin/hdiutil", ["attach", dmg.path, "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", mountPoint.path])
+            let attach = try await run("/usr/bin/hdiutil", ["attach", dmg.path, "-nobrowse", "-noverify", "-readonly", "-noautoopen", "-mountpoint", mountPoint.path])
             guard attach.status == 0 else { throw Failure(message: "Couldn't open the downloaded update.") }
             defer { _ = try? runSync("/usr/bin/hdiutil", ["detach", mountPoint.path, "-force"]) }
 
@@ -41,7 +43,9 @@ enum UpdateInstaller {
                 throw Failure(message: "Couldn't copy the update next to \(destination.lastPathComponent).")
             }
             do {
-                try await verify(staged, configuration: configuration)
+                try await verify(staged, release: release, configuration: configuration)
+                // Verified, so it is safe to let the OS treat it as the same trusted app (hosts with quarantine on).
+                _ = try? await run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", staged.path])
             } catch {
                 try? fm.removeItem(at: staged)
                 throw error
@@ -55,12 +59,27 @@ enum UpdateInstaller {
 
     /// Refuses installs that can't work: a read-only image, a translocated copy, or an unwritable folder.
     static func checkInstallable(_ destination: URL) throws {
-        let path = destination.path
-        if path.contains("/AppTranslocation/") || path.hasPrefix("/Volumes/") {
+        if destination.path.contains("/AppTranslocation/") {
             throw Failure(message: "Move \(destination.lastPathComponent) to your Applications folder first, then update.")
         }
-        guard FileManager.default.isWritableFile(atPath: destination.deletingLastPathComponent().path) else {
+        let folder = destination.deletingLastPathComponent()
+        if (try? folder.resourceValues(forKeys: [.volumeIsReadOnlyKey]))?.volumeIsReadOnly == true {
+            throw Failure(message: "Move \(destination.lastPathComponent) to your Applications folder first, then update.")
+        }
+        guard FileManager.default.isWritableFile(atPath: folder.path) else {
             throw Failure(message: "\(destination.lastPathComponent) is in a folder this Mac user can't change.")
+        }
+    }
+
+    /// Removes staging copies and backups an interrupted update left beside the app.
+    static func sweepLeftovers(for destination: URL) {
+        let fm = FileManager.default
+        let folder = destination.deletingLastPathComponent()
+        let name = destination.lastPathComponent
+        for item in (try? fm.contentsOfDirectory(atPath: folder.path)) ?? [] {
+            if item.hasPrefix(".\(name).update-") || item == ".\(name).backup" {
+                try? fm.removeItem(at: folder.appending(path: item))
+            }
         }
     }
 
@@ -72,15 +91,25 @@ enum UpdateInstaller {
 
     // MARK: - Verification
 
-    static func verify(_ app: URL, configuration: AppUpdater.Configuration) async throws {
-        let strict = try await run("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path])
+    static func verify(_ app: URL, release: ReleaseInfo? = nil, configuration: AppUpdater.Configuration) async throws {
+        // The requirement makes codesign itself insist on an Apple-anchored certificate for our Team ID.
+        let requirement = "anchor apple generic and certificate leaf[subject.OU] = \"\(configuration.teamID)\""
+        let strict = try await run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "-R=\(requirement)", app.path])
         guard strict.status == 0 else { throw Failure(message: "The downloaded update's signature is invalid, so it wasn't installed.") }
         let details = try await run("/usr/bin/codesign", ["-dv", "--verbose=2", app.path])
         guard teamID(in: details.output) == configuration.teamID else {
             throw Failure(message: "The downloaded update isn't signed by the expected developer, so it wasn't installed.")
         }
-        guard Bundle(url: app)?.bundleIdentifier == configuration.bundleIdentifier else {
+        let bundle = Bundle(url: app)
+        guard bundle?.bundleIdentifier == configuration.bundleIdentifier else {
             throw Failure(message: "The downloaded update isn't this app, so it wasn't installed.")
+        }
+        // A release tagged newer than the build inside would be offered again after every install.
+        if let release {
+            let built = bundle?.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+            guard !ReleaseInfo.isNewer(release.version, than: built), !ReleaseInfo.isNewer(built, than: release.version) else {
+                throw Failure(message: "The update's version (\(built)) doesn't match the release (\(release.version)), so it wasn't installed.")
+            }
         }
         let assess = try await run("/usr/sbin/spctl", ["--assess", "--type", "execute", app.path])
         guard assess.status == 0 else { throw Failure(message: "macOS Gatekeeper rejected the downloaded update.") }
@@ -115,13 +144,28 @@ enum UpdateInstaller {
         try? fm.moveItem(at: backup, to: destination)
     }
 
-    /// Opens the freshly installed app as a new instance (the old one is still running) and waits for it to start.
-    @MainActor
-    static func relaunch(_ app: URL) async throws {
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.createsNewApplicationInstance = true
-        configuration.activates = true
-        _ = try await NSWorkspace.shared.openApplication(at: app, configuration: configuration)
+    /// Starts a detached helper that waits for this process to exit, opens the installed app as a new instance,
+    /// and deletes the backup. If the new app won't open, the helper puts the backup back and opens that.
+    /// Running it as a separate process means the old app can finish quitting (save sheets and all) first,
+    /// and the swap never pulls files out from under live code that still needs them.
+    static func scheduleRelaunch(destination: URL, backup: URL, waitingFor pid: Int32 = ProcessInfo.processInfo.processIdentifier) throws {
+        let script = """
+        while kill -0 "$1" 2>/dev/null; do sleep 0.2; done
+        if /usr/bin/open -n "$2"; then
+          sleep 2
+          rm -rf "$3"
+        else
+          rm -rf "$2"
+          mv "$3" "$2" && /usr/bin/open -n "$2"
+        fi
+        """
+        let process = Process()
+        process.executableURL = URL(filePath: "/bin/sh")
+        process.arguments = ["-c", script, "sh", String(pid), destination.path, backup.path]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
     }
 
     // MARK: - Processes
@@ -146,41 +190,61 @@ enum UpdateInstaller {
     }
 }
 
-/// A disk-image download with progress. `URLSession.bytes` is far too slow for tens of megabytes.
+/// A disk-image download with progress, cancellation, and https-only redirects.
+/// `URLSession.bytes` is far too slow for tens of megabytes.
 private final class Downloader: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
-    private var progress: (@Sendable (Double) -> Void)?
+    private let lock = NSLock()
     private var continuation: CheckedContinuation<Void, Error>?
+    private var task: URLSessionDownloadTask?
+    private var progress: (@Sendable (Double) -> Void)?
     private var target: URL?
 
     func fetch(_ url: URL, to target: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
-        self.target = target
-        self.progress = progress
         let session = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            self.continuation = continuation
-            session.downloadTask(with: url).resume()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let task = session.downloadTask(with: url)
+                lock.withLock {
+                    self.target = target
+                    self.progress = progress
+                    self.continuation = continuation
+                    self.task = task
+                }
+                if Task.isCancelled { finish(CancellationError()); return }
+                task.resume()
+            }
+        } onCancel: {
+            lock.withLock { task }?.cancel()
         }
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        if totalBytesExpectedToWrite > 0 { progress?(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)) }
+        guard totalBytesExpectedToWrite > 0 else { return }
+        lock.withLock { progress }?(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite))
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(request.url?.scheme == "https" ? request : nil)
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        guard let target else { return }
+        guard let target = lock.withLock({ target }) else { return }
         let status = (downloadTask.response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else { finish(UpdateInstaller.Failure(message: "The download failed (HTTP \(status)).")); return }
         do { try FileManager.default.moveItem(at: location, to: target); finish(nil) } catch { finish(error) }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let error { finish(error) }
+        guard let error else { return }
+        finish((error as? URLError)?.code == .cancelled ? CancellationError() : error)
     }
 
     private func finish(_ error: Error?) {
-        guard let continuation else { return }
-        self.continuation = nil
+        guard let continuation = lock.withLock({ () -> CheckedContinuation<Void, Error>? in
+            defer { self.continuation = nil }
+            return self.continuation
+        }) else { return }
         if let error { continuation.resume(throwing: error) } else { continuation.resume() }
     }
 }

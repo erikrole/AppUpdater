@@ -240,3 +240,46 @@ final class WindowTests: XCTestCase {
         }
     }
 }
+
+final class HardeningTests: XCTestCase {
+    func testSweepRemovesLeftoversOnly() throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "AppUpdaterSweep-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let names = ["X.app", ".X.app.backup", ".X.app.update-1234abcd", "Y.app", ".Y.app.backup"]
+        for name in names { try FileManager.default.createDirectory(at: dir.appending(path: name), withIntermediateDirectories: true) }
+        UpdateInstaller.sweepLeftovers(for: dir.appending(path: "X.app"))
+        let left = Set(try FileManager.default.contentsOfDirectory(atPath: dir.path))
+        XCTAssertEqual(left, ["X.app", "Y.app", ".Y.app.backup"])
+    }
+
+    func testSwapSucceedsWithStaleBackup() throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "AppUpdaterStale-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        for name in ["X.app", ".X.app.backup", ".X.app.update-1"] {
+            try FileManager.default.createDirectory(at: dir.appending(path: name), withIntermediateDirectories: true)
+        }
+        let backup = try UpdateInstaller.swap(destination: dir.appending(path: "X.app"), with: dir.appending(path: ".X.app.update-1"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appending(path: "X.app").path))
+    }
+
+    @MainActor
+    func testBadRepositoryNameIsRejected() async {
+        let updater = AppUpdater(
+            .init(repository: "not a repo/../x", assetName: "A.dmg", bundleIdentifier: "com.x.A", currentVersion: "1.0"),
+            defaults: UserDefaults(suiteName: "AppUpdaterTests-\(UUID().uuidString)")!
+        )
+        updater.fetch = { _ in XCTFail("must not fetch"); return (Data(), 200) }
+        guard case .failed = await updater.evaluate(userInitiated: true) else { return XCTFail() }
+    }
+
+    func testReadOnlyVolumeIsRefusedAndNormalFolderAccepted() throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "AppUpdaterRO-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertNoThrow(try UpdateInstaller.checkInstallable(dir.appending(path: "X.app")))
+        // A copy under an external volume path is fine as long as the volume is writable (no blanket /Volumes ban).
+        XCTAssertNoThrow(try UpdateInstaller.checkInstallable(dir.appending(path: "Volumes/X.app").deletingLastPathComponent().appending(path: "X.app")))
+    }
+}
