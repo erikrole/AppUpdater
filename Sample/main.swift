@@ -44,6 +44,13 @@ app.setActivationPolicy(.regular)
             - **A folder named for your camera.** SLOW2, ROAM1 and the rest get their own folder from the first card.
             - **Games never merge.** A card from another game gets a dated folder, like `ROAM1_2026-10-24`.
             - Faster verification on large cards.
+              - Checksums run while the next card copies.
+            ## To try it
+            1. Offload a card.
+            2. Open the folder.
+            ```
+            Offload --verify
+            ```
             """,
             downloadURL: URL(string: "https://github.com/erikrole/offload-releases/releases/latest/download/Offload.dmg")!,
             pageURL: URL(string: "https://github.com/erikrole/offload-releases/releases"),

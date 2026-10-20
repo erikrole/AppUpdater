@@ -178,13 +178,13 @@ final class NotesTests: XCTestCase {
         XCTAssertNil(parsed.sections[0].title)
         XCTAssertEqual(parsed.sections[0].items, ["One", "Two"])
         XCTAssertEqual(parsed.sections[1].title, "Fixes")
-        XCTAssertEqual(parsed.sections[1].items, ["Three", "Plain line"])
+        XCTAssertEqual(parsed.sections[1].items, ["Three", .init("Plain line", kind: .paragraph)])
     }
 
     func testPlainParagraphIsNotBulleted() {
         let parsed = ReleaseNotesSections(markdown: "Just fixes.")
         XCTAssertNil(parsed.headline)
-        XCTAssertEqual(parsed.sections, [.init(title: nil, items: ["Just fixes."], isBullets: false)])
+        XCTAssertEqual(parsed.sections, [.init(title: nil, items: [.init("Just fixes.", kind: .paragraph)])])
     }
 
     @MainActor
@@ -279,5 +279,144 @@ final class HardeningTests: XCTestCase {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         XCTAssertNoThrow(try UpdateInstaller.checkInstallable(dir.appending(path: "X.app")))
+    }
+}
+
+final class StubProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var handler: (@Sendable (URLRequest) -> (HTTPURLResponse, Data))?
+    nonisolated(unsafe) static var hang = false
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        if StubProtocol.hang { return }
+        guard let (response, data) = StubProtocol.handler?(request) else { client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet)); return }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+final class DownloaderTests: XCTestCase {
+    private static func fetch(_ url: String) async throws -> Data {
+        let target = FileManager.default.temporaryDirectory.appending(path: "dl-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: target) }
+        let downloader = Downloader()
+        downloader.protocolClasses = [StubProtocol.self]
+        try await downloader.fetch(URL(string: url)!, to: target) { _ in }
+        return try Data(contentsOf: target)
+    }
+
+    func testDownloadsBody() async throws {
+        StubProtocol.hang = false
+        StubProtocol.handler = { request in (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data("dmg".utf8)) }
+        let data = try await Self.fetch("https://github.com/a/b/x.dmg")
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), "dmg")
+    }
+
+    func testNon200AndTransportErrorsThrow() async {
+        StubProtocol.hang = false
+        StubProtocol.handler = { request in (HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!, Data("nope".utf8)) }
+        do { _ = try await Self.fetch("https://github.com/a/b/x.dmg"); XCTFail() } catch {
+            XCTAssertTrue((error as? UpdateInstaller.Failure)?.message.contains("404") == true)
+        }
+        StubProtocol.handler = nil
+        do { _ = try await Self.fetch("https://github.com/a/b/x.dmg"); XCTFail() } catch {}
+    }
+
+    func testNonHTTPSRedirectIsRefused() async {
+        StubProtocol.hang = false
+        StubProtocol.handler = { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 302, httpVersion: nil, headerFields: ["Location": "http://evil.example/x.dmg"])!, Data())
+        }
+        do { _ = try await Self.fetch("https://github.com/a/b/x.dmg"); XCTFail() } catch {}
+    }
+
+    func testCancellationResumesOnceWithCancellationError() async {
+        StubProtocol.hang = true
+        defer { StubProtocol.hang = false }
+        let task = Task { try await Self.fetch("https://github.com/a/b/x.dmg") }
+        try? await Task.sleep(for: .milliseconds(300))
+        task.cancel()
+        do { _ = try await task.value; XCTFail() } catch { XCTAssertTrue(error is CancellationError) }
+    }
+}
+
+@MainActor
+final class VerifyTests: XCTestCase {
+    private func makeApp(version: String, bundleID: String) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "AppUpdaterVerify-\(UUID().uuidString)")
+        let app = dir.appending(path: "T.app")
+        let macOS = app.appending(path: "Contents/MacOS")
+        try FileManager.default.createDirectory(at: macOS, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: URL(filePath: "/usr/bin/true"), to: macOS.appending(path: "T"))
+        let plist: [String: Any] = ["CFBundleIdentifier": bundleID, "CFBundleExecutable": "T", "CFBundleShortVersionString": version, "CFBundlePackageType": "APPL"]
+        (plist as NSDictionary).write(to: app.appending(path: "Contents/Info.plist"), atomically: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        return app
+    }
+
+    func testAdHocSignedAppIsRefused() async throws {
+        let app = try makeApp(version: "2.0", bundleID: "com.x.T")
+        _ = try UpdateInstaller.runSync("/usr/bin/codesign", ["-s", "-", "--force", app.path])
+        let configuration = AppUpdater.Configuration(repository: "a/b", assetName: "T.dmg", bundleIdentifier: "com.x.T", currentVersion: "1.0")
+        let release = ReleaseInfo(version: "2.0", notes: "", downloadURL: URL(string: "https://github.com/a/b")!)
+        do { try await UpdateInstaller.verify(app, release: release, configuration: configuration); XCTFail("must refuse") } catch {
+            XCTAssertTrue(error is UpdateInstaller.Failure)
+        }
+    }
+
+    func testUnsignedAppIsRefused() async throws {
+        let app = try makeApp(version: "2.0", bundleID: "com.x.T")
+        let configuration = AppUpdater.Configuration(repository: "a/b", assetName: "T.dmg", bundleIdentifier: "com.x.T", currentVersion: "1.0")
+        do { try await UpdateInstaller.verify(app, configuration: configuration); XCTFail("must refuse") } catch {}
+    }
+}
+
+final class NestedNotesTests: XCTestCase {
+    func testNestedBulletsNumbersAndCode() {
+        let md = "## Head\n- Top\n  - Nested\n    - Deeper\n1. First\n2) Second\n```\nswift build\n```\nDone."
+        let items = ReleaseNotesSections(markdown: md).sections[0].items
+        XCTAssertEqual(items[0], .init("Top"))
+        XCTAssertEqual(items[1], .init("Nested", kind: .bullet, level: 1))
+        XCTAssertEqual(items[2], .init("Deeper", kind: .bullet, level: 2))
+        XCTAssertEqual(items[3], .init("First", kind: .number("1."), level: 0))
+        XCTAssertEqual(items[4], .init("Second", kind: .number("2)"), level: 0))
+        XCTAssertEqual(items[5], .init("swift build", kind: .code))
+        XCTAssertEqual(items[6], .init("Done.", kind: .paragraph))
+    }
+}
+
+@MainActor
+final class RealSignedVerifyTests: XCTestCase {
+    private func scratchCopyOfOffload() throws -> URL {
+        let source = URL(filePath: "/Applications/Offload.app")
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: source.path))
+        let dir = FileManager.default.temporaryDirectory.appending(path: "AppUpdaterReal-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let copy = dir.appending(path: "Offload.app")
+        _ = try UpdateInstaller.runSync("/usr/bin/ditto", [source.path, copy.path])
+        return copy
+    }
+
+    func testRealSignedAppPassesThenWrongTeamAndVersionAreRefused() async throws {
+        let app = try scratchCopyOfOffload()
+        let built = Bundle(url: app)?.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+        let url = URL(string: "https://github.com/erikrole/offload-releases")!
+        var configuration = AppUpdater.Configuration(repository: "erikrole/offload-releases", assetName: "Offload.dmg", bundleIdentifier: "com.erole.Offload", currentVersion: "1.0")
+        try await UpdateInstaller.verify(app, release: ReleaseInfo(version: built, notes: "", downloadURL: url), configuration: configuration)
+
+        do {
+            try await UpdateInstaller.verify(app, release: ReleaseInfo(version: "9.9.9", notes: "", downloadURL: url), configuration: configuration)
+            XCTFail("version mismatch must be refused")
+        } catch { XCTAssertTrue((error as? UpdateInstaller.Failure)?.message.contains("doesn't match") == true) }
+
+        configuration.teamID = "AAAAAAAAAA"
+        do { try await UpdateInstaller.verify(app, release: nil, configuration: configuration); XCTFail("wrong team must be refused") } catch {}
+
+        configuration.teamID = "T26T3G8C7Q"
+        configuration.bundleIdentifier = "com.example.Other"
+        do { try await UpdateInstaller.verify(app, release: nil, configuration: configuration); XCTFail("wrong bundle ID must be refused") } catch {}
     }
 }

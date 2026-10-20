@@ -212,7 +212,7 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
                 content.addArrangedSubview(label)
             }
             for item in section.items {
-                let row = noteRow(item, bullet: section.isBullets)
+                let row = noteRow(item)
                 content.addArrangedSubview(row)
                 row.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
             }
@@ -257,33 +257,64 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         return card
     }
 
-    private func noteRow(_ markdown: String, bullet: Bool) -> NSView {
+    private func noteRow(_ item: ReleaseNotesSections.Item) -> NSView {
         let font = NSFont.systemFont(ofSize: 13)
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = 2
         let text = NSTextField(wrappingLabelWithString: "")
-        text.attributedStringValue = ReleaseNotesRenderer.inline(markdown, font: font, color: .labelColor, style: paragraph)
+        if item.kind == .code {
+            text.attributedStringValue = NSAttributedString(string: item.text, attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular), .foregroundColor: NSColor.labelColor,
+            ])
+            text.isSelectable = true
+            let box = NSBox()
+            box.boxType = .custom
+            box.cornerRadius = 6
+            box.borderWidth = 0
+            box.fillColor = .quaternaryLabelColor
+            box.contentViewMargins = NSSize(width: 8, height: 6)
+            box.titlePosition = .noTitle
+            box.contentView = text
+            return box
+        }
+        text.attributedStringValue = ReleaseNotesRenderer.inline(item.text, font: font, color: .labelColor, style: paragraph)
         text.isSelectable = true
         text.allowsEditingTextAttributes = true
         text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        guard bullet else { return text }
-        let dot = DotView(color: accent)
-        dot.translatesAutoresizingMaskIntoConstraints = false
-        dot.widthAnchor.constraint(equalToConstant: 6).isActive = true
-        dot.heightAnchor.constraint(equalToConstant: 6).isActive = true
-        let dotColumn = NSView()
-        dotColumn.translatesAutoresizingMaskIntoConstraints = false
-        dotColumn.addSubview(dot)
-        NSLayoutConstraint.activate([
-            dotColumn.widthAnchor.constraint(equalToConstant: 6),
-            dot.leadingAnchor.constraint(equalTo: dotColumn.leadingAnchor),
-            dot.topAnchor.constraint(equalTo: dotColumn.topAnchor, constant: 6),
-            dotColumn.heightAnchor.constraint(greaterThanOrEqualToConstant: 12),
-        ])
-        let row = NSStackView(views: [dotColumn, text])
+        if item.kind == .paragraph { return text }
+
+        let marker: NSView
+        let markerWidth: CGFloat
+        switch item.kind {
+        case let .number(number):
+            let label = NSTextField(labelWithString: number)
+            label.font = .monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
+            label.textColor = accent
+            label.alignment = .right
+            marker = label
+            markerWidth = 22
+        default:
+            let dotColumn = NSView()
+            let dot = DotView(color: item.level == 0 ? accent : accent.withAlphaComponent(0.55))
+            dot.translatesAutoresizingMaskIntoConstraints = false
+            dotColumn.addSubview(dot)
+            NSLayoutConstraint.activate([
+                dot.widthAnchor.constraint(equalToConstant: 6),
+                dot.heightAnchor.constraint(equalToConstant: 6),
+                dot.leadingAnchor.constraint(equalTo: dotColumn.leadingAnchor),
+                dot.topAnchor.constraint(equalTo: dotColumn.topAnchor, constant: 6),
+                dotColumn.heightAnchor.constraint(greaterThanOrEqualToConstant: 12),
+            ])
+            marker = dotColumn
+            markerWidth = 6
+        }
+        marker.translatesAutoresizingMaskIntoConstraints = false
+        marker.widthAnchor.constraint(equalToConstant: markerWidth).isActive = true
+        let row = NSStackView(views: [marker, text])
         row.orientation = .horizontal
         row.alignment = .top
         row.spacing = 10
+        row.edgeInsets = NSEdgeInsets(top: 0, left: CGFloat(item.level) * 18, bottom: 0, right: 0)
         return row
     }
 

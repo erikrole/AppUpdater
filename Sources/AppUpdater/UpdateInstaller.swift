@@ -192,15 +192,19 @@ enum UpdateInstaller {
 
 /// A disk-image download with progress, cancellation, and https-only redirects.
 /// `URLSession.bytes` is far too slow for tens of megabytes.
-private final class Downloader: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+final class Downloader: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Void, Error>?
     private var task: URLSessionDownloadTask?
     private var progress: (@Sendable (Double) -> Void)?
     private var target: URL?
+    /// Extra URL protocol classes, for tests.
+    var protocolClasses: [AnyClass] = []
 
     func fetch(_ url: URL, to target: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
-        let session = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: nil)
+        let configuration = URLSessionConfiguration.ephemeral
+        if !protocolClasses.isEmpty { configuration.protocolClasses = protocolClasses }
+        let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
