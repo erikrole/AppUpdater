@@ -420,3 +420,58 @@ final class RealSignedVerifyTests: XCTestCase {
         do { try await UpdateInstaller.verify(app, release: nil, configuration: configuration); XCTFail("wrong bundle ID must be refused") } catch {}
     }
 }
+
+@MainActor
+final class LayoutTests: XCTestCase {
+    private let long = "A very long bullet that must wrap onto several lines instead of running off the right edge of the card, including `inline code` and **bold text** to make sure styled runs wrap too."
+
+    private func allViews(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(allViews) }
+
+    private func makeWindow(notes: String) -> NSWindow {
+        _ = NSApplication.shared
+        let updater = AppUpdater(
+            .init(repository: "a/b", assetName: "A.dmg", bundleIdentifier: "com.x.A", displayName: "A", currentVersion: "1.0"),
+            defaults: UserDefaults(suiteName: "AppUpdaterTests-\(UUID().uuidString)")!
+        )
+        let release = ReleaseInfo(version: "2.0", notes: notes, downloadURL: URL(string: "https://github.com/a/b")!, pageURL: URL(string: "https://github.com/a/b"))
+        let controller = UpdateWindowController(mode: .available(release), updater: updater)
+        addTeardownBlock { controller.window?.close() }
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+        return controller.window!
+    }
+
+    func testLongNotesWrapInsideTheCardAndSkipStaysOneLine() throws {
+        let window = makeWindow(notes: "## Head\n- \(long)\n  - Nested: \(long)\n1. Numbered: \(long)\nPlain: \(long)\n```\nswift build --configuration release --arguments-that-are-long-enough-to-wrap-around\n```")
+        let content = try XCTUnwrap(window.contentView)
+        content.layoutSubtreeIfNeeded()
+        let views = allViews(content)
+        let card = try XCTUnwrap(views.first { String(describing: type(of: $0)).contains("CardView") })
+        let cardFrame = card.convert(card.bounds, to: nil)
+
+        let labels = views.compactMap { $0 as? NSTextField }.filter { $0.isDescendant(of: card) && !$0.stringValue.isEmpty }
+        XCTAssertGreaterThan(labels.count, 5)
+        for label in labels {
+            let frame = label.convert(label.bounds, to: nil)
+            XCTAssertLessThanOrEqual(frame.maxX, cardFrame.maxX + 0.5, "'\(label.stringValue.prefix(30))' runs past the card")
+            XCTAssertGreaterThanOrEqual(frame.minX, cardFrame.minX - 0.5)
+            // A wrapped label is as tall as the lines its text needs at its own width.
+            if label.stringValue.count > 80 {
+                let needed = label.attributedStringValue.boundingRect(
+                    with: NSSize(width: frame.width, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin, .usesFontLeading]
+                ).height
+                XCTAssertGreaterThanOrEqual(label.frame.height + 2, needed, "'\(label.stringValue.prefix(30))' is clipped")
+            }
+        }
+
+        let link = try XCTUnwrap(views.compactMap { $0 as? NSButton }.first { $0.title == "View on GitHub" })
+        XCTAssertFalse(link.isHidden)
+        XCTAssertGreaterThan(link.frame.width, 60)
+        XCTAssertGreaterThan(link.frame.height, 10)
+        let skip = try XCTUnwrap(views.compactMap { $0 as? NSButton }.first { $0.title == "Skip This Version" })
+        XCTAssertLessThan(skip.frame.height, 30, "Skip This Version wrapped")
+        XCTAssertGreaterThanOrEqual(skip.frame.width, skip.intrinsicContentSize.width - 0.5)
+        for button in views.compactMap({ $0 as? NSButton }) where button.isDescendant(of: content) {
+            XCTAssertLessThanOrEqual(button.convert(button.bounds, to: nil).maxX, content.bounds.maxX, "\(button.title) is cut off")
+        }
+    }
+}

@@ -30,7 +30,7 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         self.mode = mode
         self.updater = updater
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 600),
+            contentRect: NSRect(x: 0, y: 0, width: UpdateWindowController.windowWidth, height: 600),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered, defer: false
         )
@@ -43,9 +43,9 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         window.delegate = self
         let content = buildContent()
         window.contentView = content
-        content.widthAnchor.constraint(equalToConstant: 500).isActive = true
+        content.widthAnchor.constraint(equalToConstant: Self.windowWidth).isActive = true
         content.layoutSubtreeIfNeeded()
-        window.setContentSize(NSSize(width: 500, height: max(content.fittingSize.height, 380)))
+        window.setContentSize(NSSize(width: Self.windowWidth, height: max(content.fittingSize.height, 380)))
         window.center()
     }
 
@@ -115,13 +115,20 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         configure(updateButton, title: style.primaryButtonTitle ?? (isUpdated ? "Continue" : "Update and Relaunch"), action: #selector(updateTapped), primary: true)
         configure(laterButton, title: "Later", action: #selector(laterTapped))
         configure(skipButton, title: "Skip This Version", action: #selector(skipTapped))
-        for quiet in [laterButton, skipButton] {
+        for quiet in [laterButton, skipButton, viewButton] {
             quiet.isBordered = false
             quiet.contentTintColor = .secondaryLabelColor
             quiet.controlSize = .regular
             quiet.font = .systemFont(ofSize: 13)
         }
         laterButton.keyEquivalent = "\u{1b}"
+        for single in [skipButton, laterButton, updateButton, viewButton] {
+            // Buttons never wrap or shrink: the row sizes to fit them.
+            single.lineBreakMode = .byClipping
+            (single.cell as? NSButtonCell)?.wraps = false
+            single.setContentCompressionResistancePriority(.required, for: .horizontal)
+            single.setContentHuggingPriority(.required, for: .horizontal)
+        }
         configure(viewButton, title: "View on GitHub", action: #selector(viewTapped))
         viewButton.isBordered = false
         viewButton.contentTintColor = .secondaryLabelColor
@@ -144,10 +151,10 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
 
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let buttons = NSStackView(views: isUpdated ? [spacer, updateButton] : [skipButton, viewButton, spacer, laterButton, updateButton])
+        let buttons = NSStackView(views: isUpdated ? [spacer, updateButton] : [skipButton, spacer, laterButton, updateButton])
         buttons.orientation = .horizontal
         buttons.alignment = .centerY
-        buttons.spacing = 14
+        buttons.spacing = 12
 
         let stack = NSStackView(views: [header, notes, progress, statusLabel, buttons])
         stack.orientation = .vertical
@@ -181,6 +188,22 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
     }
 
     /// Version header, then each section of the release notes as a titled list, in a scrolling card.
+    /// Window 500, 28 margins, 1pt card border, 16 padding each side.
+    static let windowWidth: CGFloat = 500
+    static let notesTextWidth: CGFloat = windowWidth - 56 - 32
+
+    private func wrap(_ label: NSTextField, width: CGFloat) {
+        label.lineBreakMode = .byWordWrapping
+        label.maximumNumberOfLines = 0
+        label.cell?.wraps = true
+        label.cell?.isScrollable = false
+        label.preferredMaxLayoutWidth = width
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        label.setContentCompressionResistancePriority(.required, for: .vertical)
+        label.widthAnchor.constraint(equalToConstant: width).isActive = true
+    }
+
     private func notesView(for release: ReleaseInfo) -> NSView {
         let parsed = ReleaseNotesSections(markdown: updater.resolvedNotes(for: release))
 
@@ -190,22 +213,31 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         content.spacing = 6
         content.translatesAutoresizingMaskIntoConstraints = false
 
-        let versionLabel = NSTextField(labelWithString: "Version \(release.version)")
-        versionLabel.font = .systemFont(ofSize: 11, weight: .semibold)
-        versionLabel.textColor = .secondaryLabelColor
-        content.addArrangedSubview(versionLabel)
+        // The title already names the version, so the card's top row only carries the link to the release page.
+        let linkSpacer = NSView()
+        linkSpacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        viewButton.translatesAutoresizingMaskIntoConstraints = false
+        viewButton.heightAnchor.constraint(equalToConstant: 18).isActive = true
+        let versionRow = NSStackView(views: [linkSpacer, viewButton])
+        versionRow.orientation = .horizontal
+        versionRow.alignment = .centerY
+        content.addArrangedSubview(versionRow)
+        versionRow.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         if let headline = parsed.headline {
             let label = NSTextField(wrappingLabelWithString: headline)
             label.font = .systemFont(ofSize: 16, weight: .semibold)
+            wrap(label, width: Self.notesTextWidth)
             content.addArrangedSubview(label)
             content.setCustomSpacing(12, after: label)
+            label.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         } else {
-            content.setCustomSpacing(10, after: versionLabel)
+            content.setCustomSpacing(4, after: versionRow)
         }
 
         for section in parsed.sections {
             if let title = section.title {
                 let label = NSTextField(wrappingLabelWithString: title)
+                wrap(label, width: Self.notesTextWidth)
                 label.font = .systemFont(ofSize: 13, weight: .semibold)
                 label.textColor = .secondaryLabelColor
                 if let last = content.arrangedSubviews.last { content.setCustomSpacing(14, after: last) }
@@ -228,14 +260,7 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
             content.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -14),
         ])
 
-        let card = NSBox()
-        card.boxType = .custom
-        card.cornerRadius = 12
-        card.borderWidth = 1
-        card.borderColor = .separatorColor
-        card.fillColor = .controlBackgroundColor
-        card.titlePosition = .noTitle
-        card.contentViewMargins = .zero
+        let card = CardView()
         card.translatesAutoresizingMaskIntoConstraints = false
         let scroll = NSScrollView()
         scroll.documentView = document
@@ -244,15 +269,21 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        card.contentView = scroll
         scroll.setAccessibilityLabel("Release notes for version \(release.version)")
-        let clip = scroll.contentView
-        document.widthAnchor.constraint(equalTo: clip.widthAnchor).isActive = true
-        let natural = scroll.heightAnchor.constraint(equalTo: document.heightAnchor)
+        card.addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: card.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: card.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: card.bottomAnchor),
+            document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            card.heightAnchor.constraint(greaterThanOrEqualToConstant: 150),
+            card.heightAnchor.constraint(lessThanOrEqualToConstant: 400),
+        ])
+        // Fit the notes when they are short; scroll when they are long.
+        let natural = card.heightAnchor.constraint(equalTo: document.heightAnchor)
         natural.priority = .defaultHigh
         natural.isActive = true
-        scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
-        scroll.heightAnchor.constraint(lessThanOrEqualToConstant: 340).isActive = true
         card.setContentHuggingPriority(.defaultLow, for: .vertical)
         return card
     }
@@ -267,54 +298,68 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
                 .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular), .foregroundColor: NSColor.labelColor,
             ])
             text.isSelectable = true
-            let box = NSBox()
-            box.boxType = .custom
-            box.cornerRadius = 6
-            box.borderWidth = 0
-            box.fillColor = .quaternaryLabelColor
-            box.contentViewMargins = NSSize(width: 8, height: 6)
-            box.titlePosition = .noTitle
-            box.contentView = text
+            text.maximumNumberOfLines = 0
+            text.preferredMaxLayoutWidth = Self.notesTextWidth - 16
+            text.lineBreakMode = .byWordWrapping
+            text.cell?.wraps = true
+            text.translatesAutoresizingMaskIntoConstraints = false
+            text.setContentCompressionResistancePriority(.required, for: .vertical)
+            let box = CodeBox()
+            box.translatesAutoresizingMaskIntoConstraints = false
+            box.addSubview(text)
+            NSLayoutConstraint.activate([
+                text.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
+                text.topAnchor.constraint(equalTo: box.topAnchor, constant: 6),
+                text.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -6),
+                text.widthAnchor.constraint(equalToConstant: Self.notesTextWidth - 16),
+            ])
             return box
         }
         text.attributedStringValue = ReleaseNotesRenderer.inline(item.text, font: font, color: .labelColor, style: paragraph)
         text.isSelectable = true
         text.allowsEditingTextAttributes = true
-        text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        if item.kind == .paragraph { return text }
+        let indent = CGFloat(item.level) * 18
+        if item.kind == .paragraph {
+            wrap(text, width: Self.notesTextWidth)
+            return text
+        }
+        let markerColumn: CGFloat = { if case .number = item.kind { 22 } else { 6 } }()
+        wrap(text, width: Self.notesTextWidth - indent - markerColumn - 10)
 
+        // Plain constraints, not a nested stack: the row's height is exactly the wrapped text's height.
+        let row = NSView()
+        row.translatesAutoresizingMaskIntoConstraints = false
         let marker: NSView
         let markerWidth: CGFloat
+        let markerTop: CGFloat
         switch item.kind {
         case let .number(number):
             let label = NSTextField(labelWithString: number)
             label.font = .monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
             label.textColor = accent
-            label.alignment = .right
+            label.alignment = .left
             marker = label
             markerWidth = 22
+            markerTop = 0
         default:
-            let dotColumn = NSView()
-            let dot = DotView(color: item.level == 0 ? accent : accent.withAlphaComponent(0.55))
-            dot.translatesAutoresizingMaskIntoConstraints = false
-            dotColumn.addSubview(dot)
-            NSLayoutConstraint.activate([
-                dot.widthAnchor.constraint(equalToConstant: 6),
-                dot.heightAnchor.constraint(equalToConstant: 6),
-                dot.leadingAnchor.constraint(equalTo: dotColumn.leadingAnchor),
-                dot.topAnchor.constraint(equalTo: dotColumn.topAnchor, constant: 6),
-                dotColumn.heightAnchor.constraint(greaterThanOrEqualToConstant: 12),
-            ])
-            marker = dotColumn
+            marker = DotView(color: item.level == 0 ? accent : accent.withAlphaComponent(0.55))
             markerWidth = 6
+            markerTop = 7
         }
         marker.translatesAutoresizingMaskIntoConstraints = false
-        marker.widthAnchor.constraint(equalToConstant: markerWidth).isActive = true
-        let row = NSStackView(views: [marker, text])
-        row.orientation = .horizontal
-        row.alignment = .top
-        row.spacing = 10
-        row.edgeInsets = NSEdgeInsets(top: 0, left: CGFloat(item.level) * 18, bottom: 0, right: 0)
+        text.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(marker)
+        row.addSubview(text)
+        NSLayoutConstraint.activate([
+            marker.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: indent),
+            marker.topAnchor.constraint(equalTo: row.topAnchor, constant: markerTop),
+            marker.widthAnchor.constraint(equalToConstant: markerWidth),
+            marker.heightAnchor.constraint(equalToConstant: marker is DotView ? 6 : 16),
+            text.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: indent + markerWidth + 10),
+            text.topAnchor.constraint(equalTo: row.topAnchor),
+            text.bottomAnchor.constraint(equalTo: row.bottomAnchor),
+            row.heightAnchor.constraint(greaterThanOrEqualToConstant: 16),
+        ])
         return row
     }
 
@@ -331,7 +376,7 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
             (button as? FilledButton)?.fill = accent
             button.translatesAutoresizingMaskIntoConstraints = false
             button.heightAnchor.constraint(equalToConstant: 34).isActive = true
-            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 168).isActive = true
+            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
             button.attributedTitle = NSAttributedString(
                 string: title, attributes: [.foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 13, weight: .semibold)]
             )
@@ -431,5 +476,38 @@ private final class DotView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         color.setFill()
         NSBezierPath(ovalIn: bounds).fill()
+    }
+}
+
+/// The notes card: rounded, bordered, and clipped, with colours that follow light and dark.
+private final class CardView: NSView {
+    override var wantsUpdateLayer: Bool { true }
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = 12
+        layer?.masksToBounds = true
+        layer?.borderWidth = 1
+    }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+    override func updateLayer() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.borderColor = NSColor.separatorColor.cgColor
+            layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.6).cgColor
+        }
+    }
+}
+
+/// A tinted rounded box for code in the notes; the tint follows light and dark.
+private final class CodeBox: NSView {
+    override var wantsUpdateLayer: Bool { true }
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = 6
+    }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+    override func updateLayer() {
+        effectiveAppearance.performAsCurrentDrawingAppearance { layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor }
     }
 }
