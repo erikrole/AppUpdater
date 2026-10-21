@@ -598,3 +598,35 @@ final class RelaunchHelperTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
     }
 }
+
+/// The update hang: a host that answers `.terminateLater` and replies from its own task must still be able to quit when the
+/// updater asks. Runs a real AppKit host (QuitProbe), because terminating the test process itself would end the run.
+final class RequestQuitTests: XCTestCase {
+    private func probe() throws -> URL {
+        let url = Bundle(for: Self.self).bundleURL.deletingLastPathComponent().appending(path: "QuitProbe")
+        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: url.path), "QuitProbe not built next to the tests")
+        return url
+    }
+
+    /// True when the host exited by itself within `seconds`.
+    private func exits(_ arguments: [String], within seconds: TimeInterval) throws -> Bool {
+        let process = Process()
+        process.executableURL = try probe()
+        process.arguments = arguments
+        try process.run()
+        let deadline = Date().addingTimeInterval(seconds)
+        while process.isRunning, Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
+        let done = !process.isRunning
+        if !done { process.terminate(); Thread.sleep(forTimeInterval: 0.3); if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
+        return done
+    }
+
+    func testRequestQuitLetsATerminateLaterHostExit() throws {
+        XCTAssertTrue(try exits([], within: 10))
+    }
+
+    func testTerminateCalledInsideATaskStillHangs() throws {
+        // The negative control: this is the bug requestQuit exists to avoid.
+        XCTAssertFalse(try exits(["--direct"], within: 5))
+    }
+}
