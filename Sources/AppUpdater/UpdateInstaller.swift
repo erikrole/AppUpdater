@@ -159,13 +159,22 @@ enum UpdateInstaller {
           mv "$3" "$2" && /usr/bin/open -n "$2"
         fi
         """
-        let process = Process()
-        process.executableURL = URL(filePath: "/bin/sh")
-        process.arguments = ["-c", script, "sh", String(pid), destination.path, backup.path]
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
+        // Its own session, so the helper is not tied to this process's session or process group: a Force Quit of a stuck
+        // app (or anything that signals the group) must not take the relaunch down with it.
+        var attributes: posix_spawnattr_t?
+        posix_spawnattr_init(&attributes)
+        defer { posix_spawnattr_destroy(&attributes) }
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSID))
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        for descriptor in Int32(0)...2 { posix_spawn_file_actions_addopen(&actions, descriptor, "/dev/null", descriptor == 0 ? O_RDONLY : O_WRONLY, 0) }
+        let arguments = ["/bin/sh", "-c", script, "sh", String(pid), destination.path, backup.path]
+        var cArguments = arguments.map { strdup($0) } + [nil]
+        defer { cArguments.forEach { free($0) } }
+        var child: pid_t = 0
+        let status = posix_spawn(&child, "/bin/sh", &actions, &attributes, cArguments, environ)
+        guard status == 0 else { throw Failure(message: "Couldn't start the relaunch helper (\(status)).") }
     }
 
     // MARK: - Processes
