@@ -386,6 +386,12 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
     // MARK: - Actions
 
     @objc private func laterTapped() {
+        if working, installing, laterButton.title == "Don't Wait" {
+            updater.cancelPendingQuit()
+            installing = false
+            setWorking(false, status: "Update stopped. \(updater.configuration.displayName) was not changed.")
+            return
+        }
         if working { if !installing { installTask?.cancel() }; return }
         window?.close()
     }
@@ -419,6 +425,11 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
                         self.progress.isIndeterminate = true
                         self.progress.startAnimation(nil)
                         self.statusLabel.stringValue = text
+                    },
+                    quitPending: {
+                        // The app is still open: let the person stop waiting instead of leaving the splash stuck.
+                        self.laterButton.title = "Don't Wait"
+                        self.laterButton.isEnabled = true
                     }
                 )
             } catch is CancellationError {

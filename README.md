@@ -51,6 +51,15 @@ Preview the window: `swift run UpdaterPreview`.
 - **After updating:** the new version opens once with the same window in "what changed" mode.
 - Refuses to update a copy running from a disk image or a translocated path; asks to move it to Applications.
 
+## Quitting for the update
+
+After the swap, AppUpdater asks the app to quit with `AppUpdater.requestQuit()`. It calls `terminate:` from a run-loop timer,
+not from inside the install task. This matters if your `applicationShouldTerminate` returns `.terminateLater` and replies from
+a Swift task (to save first): called from inside a main-actor task, `terminate:` blocks that task's job, so your reply task can
+never run and the update hangs on "Relaunching…". If you start a quit yourself from a task, use `requestQuit()` too.
+If the app is still open 3 seconds later the splash says to finish up and offers **Don't Wait**: it ends the relaunch helper,
+puts the previous version back (`cancelPendingQuit()`) and lets the update be started again.
+
 ## Telemetry hook
 
 `onEvent` is called on the main actor, one event per step, on a later turn of the main loop (never inline, so a slow hook
@@ -99,6 +108,9 @@ Edit the generated file before publishing: commit subjects are a starting point,
 `scripts/test-release-notes.sh` tests both scripts in a scratch git repo.
 
 ## Tests
+
+`RequestQuitTests` run a real AppKit host (`QuitProbe`, a `.terminateLater` delegate that replies from a task): `requestQuit()`
+exits, and `NSApp.terminate` called inside a task still hangs (the negative control).
 
 `swift test` (offline) and `scripts/test-release-notes.sh`. `APPUPDATER_LIVE=1 swift test` also downloads the real Offload release and runs the full
 verify path against it.

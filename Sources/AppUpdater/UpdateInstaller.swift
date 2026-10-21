@@ -148,7 +148,8 @@ enum UpdateInstaller {
     /// and deletes the backup. If the new app won't open, the helper puts the backup back and opens that.
     /// Running it as a separate process means the old app can finish quitting (save sheets and all) first,
     /// and the swap never pulls files out from under live code that still needs them.
-    static func scheduleRelaunch(destination: URL, backup: URL, waitingFor pid: Int32 = ProcessInfo.processInfo.processIdentifier) throws {
+    @discardableResult
+    static func scheduleRelaunch(destination: URL, backup: URL, waitingFor pid: Int32 = ProcessInfo.processInfo.processIdentifier) throws -> pid_t {
         let script = """
         while kill -0 "$1" 2>/dev/null; do sleep 0.2; done
         if /usr/bin/open -n "$2"; then
@@ -175,6 +176,7 @@ enum UpdateInstaller {
         var child: pid_t = 0
         let status = posix_spawn(&child, "/bin/sh", &actions, &attributes, cArguments, environ)
         guard status == 0 else { throw Failure(message: "Couldn't start the relaunch helper (\(status)).") }
+        return child
     }
 
     // MARK: - Processes

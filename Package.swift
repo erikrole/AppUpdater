@@ -8,6 +8,7 @@ let package = Package(
     targets: [
         .target(name: "AppUpdater"),
         .executableTarget(name: "UpdaterPreview", dependencies: ["AppUpdater"], path: "Sample"),
-        .testTarget(name: "AppUpdaterTests", dependencies: ["AppUpdater"]),
+        .executableTarget(name: "QuitProbe", dependencies: ["AppUpdater"], path: "QuitProbe"),
+        .testTarget(name: "AppUpdaterTests", dependencies: ["AppUpdater", "QuitProbe"]),
     ]
 )
