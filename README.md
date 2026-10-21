@@ -48,7 +48,7 @@ Preview the window: `swift run UpdaterPreview`.
   the update waits for it. Leftover staging copies and backups are swept at the next launch. The signature check also
   requires an Apple-anchored certificate for the Team ID and that the bundle version matches the release tag.
   Nothing is installed unless every check passes.
-- **After updating:** the new version opens once with the same window in "what changed" mode.
+- **After updating:** by default the new version opens once with the same window in "what changed" mode. Set `postUpdate: .quiet` in the configuration for no window at all; the `.installed` event still fires, so the host can show its own note.
 - Refuses to update a copy running from a disk image or a translocated path; asks to move it to Applications.
 
 ## Quitting for the update
