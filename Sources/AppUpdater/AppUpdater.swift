@@ -37,6 +37,9 @@ public final class AppUpdater {
         }
     }
 
+    /// What opens after an update has installed and the new version launches.
+    public enum PostUpdate: Sendable { case window, quiet }
+
     public struct Configuration: @unchecked Sendable {
         /// `owner/name` of the public releases repository.
         public var repository: String
@@ -60,6 +63,9 @@ public final class AppUpdater {
         public var onEvent: (@MainActor @Sendable (Event) -> Void)?
         /// Shown when a release has no notes and none were cached from an earlier fetch.
         public var fallbackNotes: String?
+        /// What the new version does the first time it opens after an update: the "UPDATED" window (default), or nothing at all
+        /// (`.quiet`; the host can show its own note when it sees the `.installed` event).
+        public var postUpdate: PostUpdate
 
         public init(
             repository: String,
@@ -74,8 +80,10 @@ public final class AppUpdater {
             busyReason: @escaping @MainActor @Sendable () -> String? = { nil },
             style: Style = Style(),
             fallbackNotes: String? = nil,
+            postUpdate: PostUpdate = .window,
             onEvent: (@MainActor @Sendable (Event) -> Void)? = nil
         ) {
+            self.postUpdate = postUpdate
             self.onEvent = onEvent
             self.style = style
             self.fallbackNotes = fallbackNotes
@@ -231,7 +239,7 @@ public final class AppUpdater {
 
     // MARK: - What's new after an update
 
-    private func showJustUpdated() -> Bool {
+    func showJustUpdated() -> Bool {
         guard let saved = defaults.dictionary(forKey: Keys.justUpdated),
               let version = saved["version"] as? String else { return false }
         defaults.removeObject(forKey: Keys.justUpdated)
@@ -243,8 +251,10 @@ public final class AppUpdater {
             pageURL: (saved["page"] as? String).flatMap(URL.init(string:)),
             date: saved["date"] as? Date
         )
-        present(.updated(release))
         emit(.installed, release, from: saved["from"] as? String ?? "")
+        // Quiet: no window, and the launch check carries on as usual.
+        guard configuration.postUpdate == .window else { return false }
+        present(.updated(release))
         return true
     }
 

@@ -630,3 +630,32 @@ final class RequestQuitTests: XCTestCase {
         XCTAssertFalse(try exits(["--direct"], within: 5))
     }
 }
+
+final class PostUpdateTests: XCTestCase {
+    @MainActor
+    private func run(_ postUpdate: AppUpdater.PostUpdate) -> (shown: Bool, window: Bool, events: [AppUpdater.Event.Kind]) {
+        let defaults = UserDefaults(suiteName: "AppUpdaterPostUpdate-\(UUID().uuidString)")!
+        defaults.set(["version": "2.0", "notes": "- New", "from": "1.0"], forKey: AppUpdater.Keys.justUpdated)
+        var events: [AppUpdater.Event.Kind] = []
+        let configuration = AppUpdater.Configuration(repository: "a/b", assetName: "A.dmg", bundleIdentifier: "com.x.A", currentVersion: "2.0",
+                                                     postUpdate: postUpdate, onEvent: { events.append($0.kind) })
+        let updater = AppUpdater(configuration, defaults: defaults)
+        let shown = updater.showJustUpdated()
+        let hadWindow = updater.window != nil
+        updater.window?.close()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        return (shown, hadWindow, events)
+    }
+
+    @MainActor func testTheDefaultStillOpensTheUpdatedWindow() {
+        let result = run(.window)
+        XCTAssertTrue(result.shown && result.window)
+    }
+
+    @MainActor func testQuietOpensNoWindowButStillReportsInstalled() {
+        let result = run(.quiet)
+        XCTAssertFalse(result.shown)
+        XCTAssertFalse(result.window)
+        XCTAssertEqual(result.events, [.installed])
+    }
+}
