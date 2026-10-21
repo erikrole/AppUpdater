@@ -248,6 +248,16 @@ public final class AppUpdater {
         return true
     }
 
+    /// Asks the app to quit from a run-loop callout, not from inside the caller's main-actor task.
+    ///
+    /// `terminate:` waits in a nested event loop when the delegate answers `.terminateLater`. Called from inside a Swift task
+    /// (a main-queue job), that job is still running, so the main queue cannot run the delegate's own task that would reply:
+    /// the quit never finishes and the update hangs on "Relaunching…". A timer callout is not a main-queue job, so the queue
+    /// keeps running while `terminate:` waits.
+    @MainActor public static func requestQuit() {
+        NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0, inModes: [.common])
+    }
+
     func rememberInstall(of release: ReleaseInfo) {
         var saved: [String: Any] = ["version": release.version, "notes": release.notes, "from": configuration.currentVersion]
         if let page = release.pageURL { saved["page"] = page.absoluteString }
@@ -356,9 +366,10 @@ public final class AppUpdater {
         }
         finishedHandOff = true
         status("Relaunching…")
-        NSApp.terminate(nil)
-        // Still here: the app asked to finish something first (a save sheet, say). The helper waits for it to quit,
-        // then opens the new version, so there is nothing more to do but say so.
+        Self.requestQuit()
+        // Still here a moment later: the app asked to finish something first (a save sheet, say). The helper waits for it to
+        // quit, then opens the new version, so there is nothing more to do but say so.
+        try? await Task.sleep(for: .seconds(3))
         status("Finish up in \(configuration.displayName). The update opens as soon as it quits.")
     }
 }
