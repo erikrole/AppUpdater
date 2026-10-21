@@ -55,6 +55,9 @@ public final class AppUpdater {
         /// Return a reason (shown in the window) to hold an update back, such as "A copy is in progress."
         public var busyReason: @MainActor @Sendable () -> String?
         public var style: Style
+        /// Called on the main actor, after the fact and never inline, for each step of the update flow. It cannot
+        /// change the flow. Keep it quick (queue the event; don't do network work in it).
+        public var onEvent: (@MainActor @Sendable (Event) -> Void)?
         /// Shown when a release has no notes and none were cached from an earlier fetch.
         public var fallbackNotes: String?
 
@@ -70,8 +73,10 @@ public final class AppUpdater {
             currentVersion: String = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0",
             busyReason: @escaping @MainActor @Sendable () -> String? = { nil },
             style: Style = Style(),
-            fallbackNotes: String? = nil
+            fallbackNotes: String? = nil,
+            onEvent: (@MainActor @Sendable (Event) -> Void)? = nil
         ) {
+            self.onEvent = onEvent
             self.style = style
             self.fallbackNotes = fallbackNotes
             self.repository = repository
@@ -84,6 +89,23 @@ public final class AppUpdater {
             self.currentVersion = currentVersion
             self.busyReason = busyReason
         }
+    }
+
+    /// Something that happened in the update flow, for telemetry. See `Configuration.onEvent`.
+    public struct Event: Sendable, Equatable {
+        public enum Kind: String, Sendable { case shown, accepted, skipped, deferred, installed, failed }
+        /// What opened the splash.
+        public enum Trigger: String, Sendable { case launch, manual }
+
+        public var kind: Kind
+        /// The version that was running when the update was offered.
+        public var fromVersion: String
+        /// The version that was offered (or installed).
+        public var toVersion: String
+        /// For `.shown`: whether it came from the launch check or a menu item.
+        public var trigger: Trigger?
+        /// For `.failed`: what went wrong, in words.
+        public var error: String?
     }
 
     public enum CheckOutcome: Equatable, Sendable {
@@ -99,7 +121,7 @@ public final class AppUpdater {
     /// Fetches the latest-release JSON. Replaced in tests.
     var fetch: @Sendable (URL) async throws -> (Data, Int)
     let notesCache: NotesCache
-    private var window: UpdateWindowController?
+    private(set) var window: UpdateWindowController?
     private var checking = false
 
     public init(_ configuration: Configuration, defaults: UserDefaults = .standard) {
@@ -122,12 +144,12 @@ public final class AppUpdater {
     public func checkOnLaunch() {
         UpdateInstaller.sweepLeftovers(for: configuration.appURL)
         if showJustUpdated() { return }
-        Task { await check(userInitiated: false) }
+        Task { await check(userInitiated: false, trigger: .launch) }
     }
 
     /// For a "Check for Updates…" menu item: always checks, and says so when the app is current or offline.
     public func checkNow() {
-        Task { await check(userInitiated: true) }
+        Task { await check(userInitiated: true, trigger: .manual) }
     }
 
     /// Opens the update window for a made-up release, to see how it looks. Installing from it will fail.
@@ -135,13 +157,13 @@ public final class AppUpdater {
 
     // MARK: - Checking
 
-    func check(userInitiated: Bool) async {
+    func check(userInitiated: Bool, trigger: Event.Trigger? = nil) async {
         guard !checking, window == nil else { window?.bringToFront(); return }
         checking = true
         defer { checking = false }
         switch await evaluate(userInitiated: userInitiated) {
         case let .available(release):
-            present(.available(release))
+            present(.available(release), trigger: trigger ?? (userInitiated ? .manual : .launch))
         case .upToDate:
             if userInitiated { alert("\(configuration.displayName) is up to date.", "You have version \(configuration.currentVersion), the latest release.") }
         case .failed:
@@ -188,7 +210,24 @@ public final class AppUpdater {
         return "Improvements and fixes."
     }
 
-    func skip(_ release: ReleaseInfo) { defaults.set(release.version, forKey: Keys.skipped) }
+    func skip(_ release: ReleaseInfo) {
+        defaults.set(release.version, forKey: Keys.skipped)
+        decision = .skipped
+        emit(.skipped, release)
+    }
+
+    // MARK: - Events
+
+    private enum Decision { case none, skipped, installing }
+    private var decision = Decision.none
+
+    /// Hands an event to the host's hook on a later main-actor turn, so a slow or misbehaving hook can't hold up
+    /// (or break) the update flow.
+    func emit(_ kind: Event.Kind, _ release: ReleaseInfo, trigger: Event.Trigger? = nil, error: String? = nil, from: String? = nil) {
+        guard let hook = configuration.onEvent else { return }
+        let event = Event(kind: kind, fromVersion: from ?? configuration.currentVersion, toVersion: release.version, trigger: trigger, error: error)
+        Task { @MainActor in hook(event) }
+    }
 
     // MARK: - What's new after an update
 
@@ -205,11 +244,12 @@ public final class AppUpdater {
             date: saved["date"] as? Date
         )
         present(.updated(release))
+        emit(.installed, release, from: saved["from"] as? String ?? "")
         return true
     }
 
     func rememberInstall(of release: ReleaseInfo) {
-        var saved: [String: Any] = ["version": release.version, "notes": release.notes]
+        var saved: [String: Any] = ["version": release.version, "notes": release.notes, "from": configuration.currentVersion]
         if let page = release.pageURL { saved["page"] = page.absoluteString }
         if let date = release.date { saved["date"] = date }
         defaults.set(saved, forKey: Keys.justUpdated)
@@ -217,11 +257,19 @@ public final class AppUpdater {
 
     // MARK: - UI
 
-    private func present(_ mode: UpdateWindowController.Mode) {
+    private func present(_ mode: UpdateWindowController.Mode, trigger: Event.Trigger? = nil) {
         let controller = UpdateWindowController(mode: mode, updater: self)
-        controller.onClose = { [weak self] in self?.window = nil }
+        decision = .none
+        controller.onClose = { [weak self] in
+            guard let self else { return }
+            // Closing the splash without skipping or installing is "Later", however it was closed.
+            if case let .available(release) = mode, self.decision == .none { self.emit(.deferred, release) }
+            self.decision = .none
+            self.window = nil
+        }
         window = controller
         controller.show()
+        if case let .available(release) = mode, let trigger { emit(.shown, release, trigger: trigger) }
     }
 
     private func alert(_ message: String, _ detail: String) {
@@ -253,6 +301,26 @@ public final class AppUpdater {
         status: @escaping @MainActor (String) -> Void
     ) async throws {
         guard !isInstalling else { return }
+        decision = .installing
+        emit(.accepted, release)
+        do {
+            try await performInstall(release, progress: progress, status: status)
+        } catch is CancellationError {
+            // Backing out of the download is a "Later".
+            decision = .none
+            throw CancellationError()
+        } catch {
+            decision = .none
+            emit(.failed, release, error: error.localizedDescription)
+            throw error
+        }
+    }
+
+    private func performInstall(
+        _ release: ReleaseInfo,
+        progress: @escaping @MainActor (Double) -> Void,
+        status: @escaping @MainActor (String) -> Void
+    ) async throws {
         if let reason = configuration.busyReason() { throw UpdateInstaller.Failure(message: reason) }
         isInstalling = true
         var finishedHandOff = false

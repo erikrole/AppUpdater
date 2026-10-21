@@ -51,6 +51,32 @@ Preview the window: `swift run UpdaterPreview`.
 - **After updating:** the new version opens once with the same window in "what changed" mode.
 - Refuses to update a copy running from a disk image or a translocated path; asks to move it to Applications.
 
+## Telemetry hook
+
+`onEvent` is called on the main actor, one event per step, on a later turn of the main loop (never inline, so a slow hook
+can't hold up the update). It can't change the flow. Every event carries `fromVersion` (running) and `toVersion` (offered).
+
+| `kind` | when |
+|---|---|
+| `shown` | the splash opened (`trigger`: `.launch` or `.manual`) |
+| `accepted` | Update and Relaunch was clicked (again on a retry) |
+| `skipped` | Skip This Version |
+| `deferred` | Later, Cancel during the download, or the window was closed |
+| `installed` | the **new** version, on its first launch after a successful update (same moment as the what's-new window) |
+| `failed` | the install failed; `error` says why |
+
+```swift
+let updater = AppUpdater(.init(
+    repository: "erikrole/offload-releases", assetName: "Offload.dmg",
+    onEvent: { event in
+        Analytics.record("update.\(event.kind.rawValue)", [
+            "from": event.fromVersion, "to": event.toVersion,
+            "trigger": event.trigger?.rawValue ?? "", "error": event.error ?? "",
+        ])
+    }
+))
+```
+
 ## Release notes tips
 
 The release body is the splash content. Start with a `## headline`, then bullets: `- **What changed.** Why it matters.`

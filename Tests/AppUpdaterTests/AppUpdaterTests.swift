@@ -475,3 +475,105 @@ final class LayoutTests: XCTestCase {
         }
     }
 }
+
+@MainActor
+final class EventTests: XCTestCase {
+    private final class Log: @unchecked Sendable {
+        @MainActor var events: [AppUpdater.Event] = []
+    }
+
+    private let release = ReleaseInfo(version: "2.0", notes: "- New", downloadURL: URL(string: "https://github.com/a/b/A.dmg")!)
+
+    private func make(version: String = "1.0", defaults: UserDefaults? = nil, busy: String? = nil, log: Log) -> AppUpdater {
+        _ = NSApplication.shared
+        let json = """
+        {"tag_name":"v2.0","draft":false,"prerelease":false,"body":"- New thing","html_url":"https://github.com/a/b/releases/tag/v2.0",
+         "assets":[{"name":"A.dmg","browser_download_url":"https://github.com/a/b/A.dmg"}]}
+        """
+        let updater = AppUpdater(
+            .init(repository: "a/b", assetName: "A.dmg", bundleIdentifier: "com.x.A", appURL: FileManager.default.temporaryDirectory.appending(path: "Nope-\(UUID().uuidString).app"),
+                  currentVersion: version, busyReason: { busy }, onEvent: { event in log.events.append(event) }),
+            defaults: defaults ?? UserDefaults(suiteName: "AppUpdaterTests-\(UUID().uuidString)")!
+        )
+        updater.fetch = { _ in (Data(json.utf8), 200) }
+        return updater
+    }
+
+    private func settle() async { for _ in 0..<5 { await Task.yield() } }
+
+    func testShownFromLaunchAndManualThenDeferredOnClose() async {
+        for (userInitiated, trigger) in [(false, AppUpdater.Event.Trigger.launch), (true, .manual)] {
+            let log = Log()
+            let updater = make(log: log)
+            await updater.check(userInitiated: userInitiated, trigger: trigger)
+            await settle()
+            XCTAssertEqual(log.events, [.init(kind: .shown, fromVersion: "1.0", toVersion: "2.0", trigger: trigger, error: nil)])
+            updater.window?.window?.close()
+            await settle()
+            XCTAssertEqual(log.events.map(\.kind), [.shown, .deferred])
+            XCTAssertEqual(log.events.last?.fromVersion, "1.0")
+            XCTAssertEqual(log.events.last?.toVersion, "2.0")
+        }
+    }
+
+    func testEventsAreDeliveredAfterTheCallNotInline() async {
+        let log = Log()
+        let updater = make(log: log)
+        updater.skip(release)
+        XCTAssertTrue(log.events.isEmpty, "the hook must not run inline")
+        await settle()
+        XCTAssertEqual(log.events.map(\.kind), [.skipped])
+    }
+
+    func testSkipIsNotFollowedByDeferred() async {
+        let log = Log()
+        let updater = make(log: log)
+        await updater.check(userInitiated: false, trigger: .launch)
+        updater.skip(release)
+        updater.window?.window?.close()
+        await settle()
+        XCTAssertEqual(log.events.map(\.kind), [.shown, .skipped])
+    }
+
+    func testAcceptedThenFailedCarriesTheReason() async {
+        let log = Log()
+        let updater = make(busy: "Busy copying.", log: log)
+        do { try await updater.install(release, progress: { _ in }, status: { _ in }); XCTFail() } catch {}
+        await settle()
+        XCTAssertEqual(log.events.map(\.kind), [.accepted, .failed])
+        XCTAssertEqual(log.events.last?.error, "Busy copying.")
+        XCTAssertEqual(log.events.last?.toVersion, "2.0")
+    }
+
+    func testInstalledIsReportedByTheNewVersionOnItsFirstLaunch() async {
+        let defaults = UserDefaults(suiteName: "AppUpdaterTests-\(UUID().uuidString)")!
+        let oldLog = Log()
+        make(version: "1.0", defaults: defaults, log: oldLog).rememberInstall(of: release)
+
+        let newLog = Log()
+        let updated = make(version: "2.0", defaults: defaults, log: newLog)
+        updated.fetch = { _ in throw URLError(.notConnectedToInternet) }
+        updated.checkOnLaunch()
+        await settle()
+        XCTAssertEqual(newLog.events, [.init(kind: .installed, fromVersion: "1.0", toVersion: "2.0", trigger: nil, error: nil)])
+        updated.window?.window?.close()
+        await settle()
+        XCTAssertEqual(newLog.events.map(\.kind), [.installed], "closing the what's-new window is not a deferral")
+
+        // Only once: the next launch reports nothing.
+        let again = Log()
+        let relaunch = make(version: "2.0", defaults: defaults, log: again)
+        relaunch.fetch = { _ in throw URLError(.notConnectedToInternet) }
+        relaunch.checkOnLaunch()
+        await settle()
+        XCTAssertTrue(again.events.isEmpty)
+    }
+
+    func testNoHookIsFine() async {
+        _ = NSApplication.shared
+        let updater = AppUpdater(.init(repository: "a/b", assetName: "A.dmg", bundleIdentifier: "com.x.A", currentVersion: "1.0"),
+                                 defaults: UserDefaults(suiteName: "AppUpdaterTests-\(UUID().uuidString)")!)
+        updater.skip(release)
+        await settle()
+    }
+}
