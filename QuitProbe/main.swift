@@ -4,8 +4,13 @@
 import AppKit
 import AppUpdater
 
+let stalled = CommandLine.arguments.contains("--stalled")
+let safe = !CommandLine.arguments.contains("--not-safe")
+
 final class Delegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // `--stalled`: a quit that never completes (cancelled, as an unanswered or declined quit would be).
+        if stalled { return .terminateCancel }
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(200))
             sender.reply(toApplicationShouldTerminate: true)
@@ -22,7 +27,9 @@ MainActor.assumeIsolated {
     let direct = CommandLine.arguments.contains("--direct")
     Task { @MainActor in
         try? await Task.sleep(for: .seconds(1))
-        if direct { NSApp.terminate(nil) } else { AppUpdater.requestQuit() }
+        if direct { NSApp.terminate(nil) }
+        else if stalled { await AppUpdater.requestQuit(fallbackAfter: .seconds(2), safeToExit: { safe }) }
+        else { AppUpdater.requestQuit() }
     }
     app.run()
     withExtendedLifetime(delegate) {}

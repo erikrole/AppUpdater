@@ -625,6 +625,14 @@ final class RequestQuitTests: XCTestCase {
         XCTAssertTrue(try exits([], within: 10))
     }
 
+    func testAStalledQuitIsFinishedByTheFallbackWhenTheHostSaysItIsSafe() throws {
+        XCTAssertTrue(try exits(["--stalled"], within: 10))
+    }
+
+    func testAStalledQuitStaysOpenWhenTheHostSaysItIsNotSafe() throws {
+        XCTAssertFalse(try exits(["--stalled", "--not-safe"], within: 6))
+    }
+
     func testTerminateCalledInsideATaskStillHangs() throws {
         // The negative control: this is the bug requestQuit exists to avoid.
         XCTAssertFalse(try exits(["--direct"], within: 5))

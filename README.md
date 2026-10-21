@@ -60,6 +60,8 @@ never run and the update hangs on "Relaunching…". If you start a quit yourself
 If the app is still open 3 seconds later the splash says to finish up and offers **Don't Wait**: it ends the relaunch helper,
 puts the previous version back (`cancelPendingQuit()`) and lets the update be started again.
 
+**Stalled quit:** if the app is still open 5 s after the quit request, no alert or sheet is up, and `Configuration.safeToExit` returns true (flush anything unsaved first), AppUpdater exits the process so the relaunch helper can open the new version. Without `safeToExit` it never forces an exit.
+
 ## Telemetry hook
 
 `onEvent` is called on the main actor, one event per step, on a later turn of the main loop (never inline, so a slow hook

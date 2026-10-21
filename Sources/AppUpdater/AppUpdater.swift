@@ -1,4 +1,5 @@
 import AppKit
+import os
 import Foundation
 
 /// Checks a GitHub releases repository for a newer build of this app, shows a splash with the release notes,
@@ -66,6 +67,10 @@ public final class AppUpdater {
         /// What the new version does the first time it opens after an update: the "UPDATED" window (default), or nothing at all
         /// (`.quiet`; the host can show its own note when it sees the `.installed` event).
         public var postUpdate: PostUpdate
+        /// Asked when the app is still open 5 seconds after the update asked it to quit (a quit that stalled, with no alert up).
+        /// Return true only when exiting now loses nothing: flush anything unsaved first. AppUpdater then exits the process so the
+        /// relaunch helper can open the new version. nil never forces an exit.
+        public var safeToExit: (@MainActor @Sendable () async -> Bool)?
 
         public init(
             repository: String,
@@ -81,9 +86,11 @@ public final class AppUpdater {
             style: Style = Style(),
             fallbackNotes: String? = nil,
             postUpdate: PostUpdate = .window,
+            safeToExit: (@MainActor @Sendable () async -> Bool)? = nil,
             onEvent: (@MainActor @Sendable (Event) -> Void)? = nil
         ) {
             self.postUpdate = postUpdate
+            self.safeToExit = safeToExit
             self.onEvent = onEvent
             self.style = style
             self.fallbackNotes = fallbackNotes
@@ -279,7 +286,20 @@ public final class AppUpdater {
     /// (a main-queue job), that job is still running, so the main queue cannot run the delegate's own task that would reply:
     /// the quit never finishes and the update hangs on "Relaunching…". A timer callout is not a main-queue job, so the queue
     /// keeps running while `terminate:` waits.
+    static let log = Logger(subsystem: "com.erole.AppUpdater", category: "update")
+
+    /// `requestQuit()`, then, if the app is still open after `wait` with no alert or sheet up and `safeToExit` says nothing would be
+    /// lost, exits the process so a waiting relaunch helper can open the new version. Returns only if the app stays open.
+    @MainActor public static func requestQuit(fallbackAfter wait: Duration, safeToExit: (@MainActor () async -> Bool)?) async {
+        requestQuit()
+        try? await Task.sleep(for: wait)
+        guard NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil, let safeToExit, await safeToExit() else { return }
+        log.error("the app was still open \(wait.components.seconds) s after the quit request with nothing pending; exiting so the update can open")
+        exit(0)
+    }
+
     @MainActor public static func requestQuit() {
+        log.info("requestQuit: scheduling terminate on the run loop")
         NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0, inModes: [.common])
     }
 
@@ -394,11 +414,11 @@ public final class AppUpdater {
         }
         finishedHandOff = true
         status("Relaunching…")
-        Self.requestQuit()
-        // Still here a moment later: the app asked to finish something first (a save sheet, say). The helper waits for it to
-        // quit, then opens the new version, so there is nothing more to do but say so.
-        try? await Task.sleep(for: .seconds(3))
+        Self.log.info("update installed; asking the app to quit")
+        // Still here afterwards: the app asked to finish something first (a save sheet, say) or its quit stalled.
+        await Self.requestQuit(fallbackAfter: .seconds(5), safeToExit: configuration.safeToExit)
         guard pendingRelaunch != nil else { return }
+        Self.log.info("the app is still open after the quit request; waiting for it")
         status("Finish up in \(configuration.displayName). The update opens as soon as it quits.")
         quitPending()
     }
