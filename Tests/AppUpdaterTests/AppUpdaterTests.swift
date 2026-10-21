@@ -577,3 +577,24 @@ final class EventTests: XCTestCase {
         await settle()
     }
 }
+
+final class RelaunchHelperTests: XCTestCase {
+    /// The helper waits for the old process, then (here, with nothing openable at the destination) restores the backup. It must
+    /// run on its own and finish without the test process doing anything more.
+    func testHelperRunsDetachedAndRestoresTheBackupWhenTheNewAppWontOpen() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "relaunch-\(UUID().uuidString)")
+        let destination = root.appending(path: "New.app"), backup = root.appending(path: ".New.app.backup")
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: backup, withIntermediateDirectories: true)
+        try Data("backup".utf8).write(to: backup.appending(path: "marker"))
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try UpdateInstaller.scheduleRelaunch(destination: destination, backup: backup, waitingFor: 999_999)
+
+        let restored = destination.appending(path: "marker")
+        let deadline = Date().addingTimeInterval(10)
+        while !FileManager.default.fileExists(atPath: restored.path), Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: restored.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+    }
+}
