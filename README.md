@@ -6,9 +6,9 @@ releases repository on launch and, when there's an update, show a splash with th
 
 ## Integrate (5 lines)
 
-1. Add the package: `.package(url: "https://github.com/erikrole/AppUpdater", branch: "main")`, product `AppUpdater`.
+1. Add the package: `.package(url: "https://github.com/erikrole/AppUpdater", revision: "<reviewed-commit>")`, product `AppUpdater`.
 2. Keep the app's version in `CFBundleShortVersionString` and publish each release to `<name>-releases` with a tag
-   like `v1.5.3`, a stable `<Name>.dmg` asset (optionally also `<Name>-1.5.3.dmg`) and the notes as the release body.
+   like `v1.5.3`, a `<Name>.dmg` or `<Name>.zip` asset (also accepts `<Name>-1.5.3-arm64.zip`, universal, and versioned names) and the notes as the release body.
 3. In your app delegate:
 
 ```swift
@@ -29,8 +29,10 @@ Optional configuration (all have defaults):
 - `fallbackNotes: "…"` is shown when a release has no notes and none were cached from an earlier fetch. Notes are cached
   per version in `~/Library/Caches/AppUpdater/<bundle id>/`, so the window is never empty.
 - `minimumCheckInterval` (default 6 hours), `teamID` (default `T26T3G8C7Q`), `displayName`, `bundleIdentifier`, `appURL`.
-- `updater.isInstalling` lets `applicationShouldTerminate` avoid quitting mid-install. Keep the `AppUpdater` instance
-  alive for the life of the app (a property on your app delegate).
+- Block ordinary quit while `updater.isInstalling && !updater.isAwaitingRelaunch`. Once `isAwaitingRelaunch` is true,
+  permit the updater quit through the host’s normal save and busy guards. Keep one updater alive for its lifetime.
+  Leave `safeToExit` unset when the host must save, restore system state, or finish queued work.
+- Automatic checks belong only in normal release launches. Skip tests, CLI helpers, snapshots, and command-only launches.
 
 For release builds, pin a reviewed commit or tag in the host's package configuration and commit its `Package.resolved`.
 Updating this package's `main` does not update an already installed app: each host must resolve the new revision, pass its
@@ -45,13 +47,17 @@ Preview the window: `swift run UpdaterPreview`.
 - **Splash:** app icon, version change, release date, release notes rendered from the GitHub release body
   (headings, bullets, nested bullets, numbered lists, bold, code and code blocks, links) in a scrolling card with a
   "View on GitHub" link. Buttons: Update and Relaunch, Later (Cancel while downloading), Skip This Version.
-- **Install:** download with progress, mount read-only, copy the app next to the installed one, verify
+- **Install:** download with progress, mount a DMG read-only or safely extract a ZIP, copy the app next to the installed one, verify
   (`codesign --verify --deep --strict`, Team ID `T26T3G8C7Q`, bundle ID, `spctl --assess`), swap with a hidden backup,
   then quit. A detached helper waits for the old process to exit, opens the new app as a new instance and deletes the
   backup; if the new app won't open it puts the old one back. If the app asks to finish something first (a save sheet),
   the update waits for it. Leftover staging copies and backups are swept at the next launch. The signature check also
   requires an Apple-anchored certificate for the Team ID and that the bundle version matches the release tag.
   Nothing is installed unless every check passes.
+- **ZIP archives:** use macOS’s libarchive-backed extractor with its default path safeguards. Require a bounded,
+  single-disk non-encrypted ZIP (no ZIP64), at most 60,000 entries and 2 GiB expanded. Reject links outside the selected
+  app, hard links, special objects, and ambiguous app payloads. Internal framework symlinks are preserved. ZIP and DMG
+  apps pass the same signature, identity, version, and Gatekeeper checks before installation.
 - **Recovery and cancellation:** a per-app file lock excludes other updater instances from preparation, cleanup, and
   rollback. The relaunch helper inherits the lock until it finishes; the small hidden `.AppName.app.updater-lock` file stays
   beside the app and must not be deleted. Cleanup restores a surviving backup if a swap was interrupted between renames.
@@ -127,8 +133,9 @@ Edit the generated file before publishing: commit subjects are a starting point,
 `RequestQuitTests` run a real AppKit host (`QuitProbe`, a `.terminateLater` delegate that replies from a task): `requestQuit()`
 exits, and `NSApp.terminate` called inside a task still hangs (the negative control).
 
-`swift test` (offline) and `scripts/test-release-notes.sh`. `APPUPDATER_LIVE=1 swift test` also downloads the real Offload release and runs the full
-verify path against it.
+`swift test` (offline) and `scripts/test-release-notes.sh`. `APPUPDATER_LIVE=1 swift test` also downloads the real Offload DMG and StatBar, PowerBar, Tweaks, and UpdateBar ZIPs, then runs the full
+verification path without installing or launching them. Optional `APPUPDATER_GITHUB_TOKEN` read-only authentication
+avoids shared unauthenticated API limits; never save a token in the repository.
 
 `swift build -Xswiftc -warnings-as-errors` checks every package product. Tests include the helper's inherited lock,
 concurrent cleanup exclusion, interrupted-swap recovery, missing-backup rollback, cancellation during preparation and

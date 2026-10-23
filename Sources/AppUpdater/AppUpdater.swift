@@ -388,6 +388,10 @@ public final class AppUpdater {
     /// in `applicationShouldTerminate`.
     public private(set) var isInstalling = false
 
+    /// True only after the verified swap and helper handoff. Hosts may allow the updater's quit at
+    /// this point while continuing to block ordinary quit during preparation. Keep save/busy guards.
+    public var isAwaitingRelaunch: Bool { pendingRelaunch?.helper != nil }
+
     /// Downloads, verifies, swaps in the new app and asks this one to quit. A detached helper opens the new app
     /// once this process has exited and removes the backup; if the new app won't open, it restores the old one.
     /// Progress is 0…1 for the download; `status` names later steps. Cancelling the task cancels the download.

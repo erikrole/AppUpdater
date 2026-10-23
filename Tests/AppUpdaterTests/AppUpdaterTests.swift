@@ -130,11 +130,11 @@ final class InstallerTests: XCTestCase {
         XCTAssertThrowsError(try UpdateInstaller.checkInstallable(URL(filePath: "/private/var/folders/x/AppTranslocation/y/d/Offload.app")))
     }
 
-    func testFindsAppByNameThenFirstApp() throws {
+    func testFindsNamedAppAndRefusesAmbiguousFallback() throws {
         let dir = try makeDirectory()
         for name in ["A.app", "B.app"] { try FileManager.default.createDirectory(at: dir.appending(path: name), withIntermediateDirectories: true) }
         XCTAssertEqual(UpdateInstaller.findApp(in: dir, named: "B.app")?.lastPathComponent, "B.app")
-        XCTAssertNotNil(UpdateInstaller.findApp(in: dir, named: "Z.app"))
+        XCTAssertNil(UpdateInstaller.findApp(in: dir, named: "Z.app"), "ambiguous apps must not be selected arbitrarily")
     }
 
     /// Downloads the real Offload release and runs the full verify path. `APPUPDATER_LIVE=1 swift test`.
@@ -142,7 +142,7 @@ final class InstallerTests: XCTestCase {
     func testLiveOffloadReleaseVerifies() async throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["APPUPDATER_LIVE"] == "1")
         let dir = try makeDirectory()
-        let (data, _) = try await URLSession.shared.data(from: URL(string: "https://api.github.com/repos/erikrole/offload-releases/releases/latest")!)
+        let data = try await liveReleaseData(repository: "erikrole/offload-releases")
         let release = try XCTUnwrap(ReleaseInfo.parse(data, assetName: "Offload.dmg"))
         let configuration = AppUpdater.Configuration(
             repository: "erikrole/offload-releases", assetName: "Offload.dmg", bundleIdentifier: "com.erole.Offload",

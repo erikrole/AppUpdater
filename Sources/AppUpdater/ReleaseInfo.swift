@@ -42,7 +42,7 @@ public struct ReleaseInfo: Sendable, Equatable {
         return parts.map { let digits = $0.drop { $0 == "0" }; return digits.isEmpty ? "0" : String(digits) }
     }
 
-    /// Reads GitHub's release JSON. Prefers the versioned `<Name>-<version>.dmg` asset over the stable `assetName`.
+    /// Reads GitHub's release JSON. Prefers a versioned native-architecture asset, then a versioned or stable asset.
     /// Drafts and prereleases are ignored, and only downloads from github.com over https are accepted.
     public static func parse(_ data: Data, assetName: String) -> ReleaseInfo? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -58,7 +58,15 @@ public struct ReleaseInfo: Sendable, Equatable {
         }
         let base = (assetName as NSString).deletingPathExtension
         let ext = (assetName as NSString).pathExtension
-        guard let download = url("\(base)-\(version).\(ext)") ?? url(assetName),
+        guard ["dmg", "zip"].contains(ext.lowercased()) else { return nil }
+        #if arch(arm64)
+        let architecture = "arm64"
+        #else
+        let architecture = "x86_64"
+        #endif
+        let candidates = ["\(base)-\(version)-\(architecture).\(ext)", "\(base)-\(version)-universal.\(ext)",
+                          "\(base)-\(version).\(ext)", "\(base)-\(architecture).\(ext)", assetName]
+        guard let download = candidates.lazy.compactMap({ url($0) }).first,
               download.scheme == "https", download.host == "github.com",
               download.user == nil, download.password == nil, download.port == nil || download.port == 443 else { return nil }
         let page = (root["html_url"] as? String).flatMap(URL.init(string:)).flatMap { url in

@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-/// Downloads a signed disk image and swaps the app it holds over the running one.
+/// Downloads a disk image or ZIP and swaps its verified app over the running one.
 /// The old copy is kept as a hidden backup until the new one has relaunched, and put back on any failure.
 enum UpdateInstaller {
     struct Failure: LocalizedError {
@@ -54,22 +54,31 @@ enum UpdateInstaller {
         let fm = FileManager.default
         try sweepLeftoversLocked(for: destination)
         let work = fm.temporaryDirectory.appending(path: "AppUpdater-\(UUID().uuidString)")
-        try fm.createDirectory(at: work, withIntermediateDirectories: true)
+        try fm.createDirectory(at: work, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         do {
-            let dmg = work.appending(path: "update.dmg")
-            try await Downloader().fetch(release.downloadURL, to: dmg, progress: progress)
+            var mounted: URL?
+            defer { if let mounted { _ = try? runSync("/usr/bin/hdiutil", ["detach", mounted.path, "-force"]) } }
+            let format = release.downloadURL.pathExtension.lowercased()
+            guard ["dmg", "zip"].contains(format) else { throw Failure(message: "The update must be a DMG or ZIP.") }
+            let payload = work.appending(path: "update.\(format)")
+            try await Downloader().fetch(release.downloadURL, to: payload, progress: progress)
             try Task.checkCancellation()
 
-            let mountPoint = work.appending(path: "mount")
-            try fm.createDirectory(at: mountPoint, withIntermediateDirectories: true)
-            let attach = try await run("/usr/bin/hdiutil", ["attach", dmg.path, "-nobrowse", "-noverify", "-readonly", "-noautoopen", "-mountpoint", mountPoint.path], checkCancellationAfterExit: false)
-            guard attach.status == 0 else { throw Failure(message: "Couldn't open the downloaded update.") }
-            defer { _ = try? runSync("/usr/bin/hdiutil", ["detach", mountPoint.path, "-force"]) }
+            let contents = work.appending(path: "contents")
+            try fm.createDirectory(at: contents, withIntermediateDirectories: true)
+            if format == "zip" {
+                try await ZIPArchive.extract(payload, to: contents)
+            } else {
+                let attach = try await run("/usr/bin/hdiutil", ["attach", payload.path, "-nobrowse", "-noverify", "-readonly", "-noautoopen", "-mountpoint", contents.path], checkCancellationAfterExit: false)
+                guard attach.status == 0 else { throw Failure(message: "Couldn't open the downloaded update.") }
+                mounted = contents
+            }
             try Task.checkCancellation()
 
-            guard let source = findApp(in: mountPoint, named: destination.lastPathComponent) else {
+            guard let source = findApp(in: contents, named: destination.lastPathComponent) else {
                 throw Failure(message: "The update didn't contain \(destination.deletingPathExtension().lastPathComponent).")
             }
+            try ZIPArchive.validateContents(in: source)
             // Stage beside the destination: the swap is then a rename on one volume, and what is verified is what is installed.
             let staged = destination.deletingLastPathComponent().appending(path: ".\(destination.lastPathComponent).update-\(UUID().uuidString.prefix(8))")
             do {
@@ -133,9 +142,20 @@ enum UpdateInstaller {
     }
 
     static func findApp(in directory: URL, named name: String) -> URL? {
-        let apps = ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [])
-            .filter { $0.pathExtension == "app" }
-        return apps.first { $0.lastPathComponent == name } ?? apps.first
+        let children = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey])) ?? []
+        func isDirectory(_ url: URL) -> Bool {
+            guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else { return false }
+            return values.isDirectory == true && values.isSymbolicLink != true
+        }
+        var apps = children.filter { $0.pathExtension == "app" && isDirectory($0) }
+        if apps.isEmpty {
+            for wrapper in children where wrapper.lastPathComponent != "__MACOSX" && isDirectory(wrapper) {
+                apps += ((try? FileManager.default.contentsOfDirectory(at: wrapper, includingPropertiesForKeys: nil)) ?? [])
+                    .filter { $0.pathExtension == "app" && isDirectory($0) }
+            }
+        }
+        let named = apps.filter { $0.lastPathComponent == name }
+        return named.count == 1 ? named[0] : (named.isEmpty && apps.count == 1 ? apps[0] : nil)
     }
 
     // MARK: - Verification
