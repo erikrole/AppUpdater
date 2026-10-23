@@ -36,7 +36,7 @@ Optional configuration (all have defaults):
 
 For release builds, pin a reviewed commit or tag in the host's package configuration and commit its `Package.resolved`.
 Updating this package's `main` does not update an already installed app: each host must resolve the new revision, pass its
-own checks, and ship a new build. See [the October 2026 audit](docs/audit-2026-10-23.md) for the local adoption inventory.
+own checks, and ship a new build. See [the October 2026 audit](docs/audit-2026-10-23.md) for the original inventory and [host adoption verification](docs/adoption-2026-10-23.md) for the completed integrations.
 
 Preview the window: `swift run UpdaterPreview`.
 
