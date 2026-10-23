@@ -3,8 +3,8 @@
 Swift 6 package, macOS 27, AppKit only, no third-party dependencies. `swift build` / `swift test`
 (`APPUPDATER_LIVE=1` adds live Offload DMG and six active public ZIP verification checks). `swift run UpdaterPreview` shows the window.
 
-- AgentBar and PowerBar were retired on October 23, 2026. Keep their source/release repositories archived and exclude
-  them from active host adoption and live release checks unless the user explicitly reactivates them.
+- AgentBar and PowerBar were retired on October 23, 2026. Exclude them from active host adoption and live release
+  checks unless the user explicitly reactivates them. Current repository lifecycle state is in `docs/retirement-2026-10-23.md`.
 
 - `ReleaseInfo` parses GitHub's latest-release JSON; `AppUpdater` decides (rate limit, skip, version) and installs;
   `UpdateInstaller` downloads, verifies, swaps and relaunches; `UpdateWindowController` is the splash.

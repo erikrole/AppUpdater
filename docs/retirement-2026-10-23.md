@@ -2,12 +2,14 @@
 
 At the user's request, AgentBar and PowerBar are retired. Development and new releases have ended.
 
-| App | Archived source | Archived public feed | Final release |
+| App | Source | Public feed | Final release |
 | --- | --- | --- | --- |
 | AgentBar | [erikrole/AgentBar](https://github.com/erikrole/AgentBar) (private) | [erikrole/agentbar-releases](https://github.com/erikrole/agentbar-releases) | [0.1.1, build 2](https://github.com/erikrole/agentbar-releases/releases/tag/v0.1.1) |
 | PowerBar | [erikrole/PowerBar](https://github.com/erikrole/PowerBar) (public) | Same repository | [0.1.1, build 5](https://github.com/erikrole/PowerBar/releases/tag/v0.1.1) |
 
-Retirement notices identify the final releases. Source history, published ZIPs, checksums, manifests, and tags are retained. AgentBar source remains private. PowerBar's GitHub Actions workflows are disabled before repository archival. Local checkout paths remain stable.
+Retirement notices identify the final releases. Source history, published ZIPs, checksums, manifests, and tags are retained. AgentBar source remains private. Local checkout paths remain stable.
+
+All three repositories remain unarchived, and PowerBar's two GitHub Actions workflows remain enabled. Automatic approval review rejected archival and workflow shutdown because the request to retire the apps did not explicitly authorize these service-state changes. Those actions await explicit user approval; no archival or workflow-disable command executed.
 
 AppUpdater's active ZIP release check now covers StatBar, Tweaks, UpdateBar, SnipBar, Cutdown, and TVBar. It no longer depends on the two retired feeds. Historical audit, adoption, platform, and publication reports retain their original release evidence. All active hosts and the shared package retain the macOS 27 minimum.
 
