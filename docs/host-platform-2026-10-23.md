@@ -1,6 +1,7 @@
 # Host platform baseline — October 23, 2026
 
 The required minimum for every active macOS host reviewed in the adoption inventory is **macOS 27.0**.
+AgentBar and PowerBar were subsequently [retired](retirement-2026-10-23.md); their entries below preserve the original platform verification.
 AppUpdater keeps its existing macOS 27 minimum. There is no compatibility work planned for earlier macOS versions.
 
 | App | Source state |

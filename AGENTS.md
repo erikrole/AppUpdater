@@ -1,7 +1,10 @@
 # AppUpdater
 
 Swift 6 package, macOS 27, AppKit only, no third-party dependencies. `swift build` / `swift test`
-(`APPUPDATER_LIVE=1` adds live Offload DMG and eight public ZIP verification checks). `swift run UpdaterPreview` shows the window.
+(`APPUPDATER_LIVE=1` adds live Offload DMG and six active public ZIP verification checks). `swift run UpdaterPreview` shows the window.
+
+- AgentBar and PowerBar were retired on October 23, 2026. Keep their source/release repositories archived and exclude
+  them from active host adoption and live release checks unless the user explicitly reactivates them.
 
 - `ReleaseInfo` parses GitHub's latest-release JSON; `AppUpdater` decides (rate limit, skip, version) and installs;
   `UpdateInstaller` downloads, verifies, swaps and relaunches; `UpdateWindowController` is the splash.

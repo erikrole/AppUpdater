@@ -150,8 +150,8 @@ final class ZIPArchiveTests: XCTestCase {
 
     @MainActor func testLivePublishedZIPsVerifyWithoutInstalling() async throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["APPUPDATER_LIVE"] == "1")
-        for name in ["StatBar", "PowerBar", "Tweaks", "UpdateBar", "AgentBar", "SnipBar", "Cutdown", "TVBar"] {
-            let repository = ["AgentBar", "SnipBar", "Cutdown", "TVBar"].contains(name)
+        for name in ["StatBar", "Tweaks", "UpdateBar", "SnipBar", "Cutdown", "TVBar"] {
+            let repository = ["SnipBar", "Cutdown", "TVBar"].contains(name)
                 ? "erikrole/\(name.lowercased())-releases" : "erikrole/\(name)"
             let root = try scratch()
             let data = try await liveReleaseData(repository: repository)
