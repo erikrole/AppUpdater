@@ -9,7 +9,7 @@ At the user's request, AgentBar and PowerBar are retired. Development and new re
 
 Retirement notices identify the final releases. Source history, published ZIPs, checksums, manifests, and tags are retained. AgentBar source remains private. Local checkout paths remain stable.
 
-All three repositories remain unarchived, and PowerBar's two GitHub Actions workflows remain enabled. Automatic approval review rejected archival and workflow shutdown because the request to retire the apps did not explicitly authorize these service-state changes. Those actions await explicit user approval; no archival or workflow-disable command executed.
+The user explicitly approved archiving `erikrole/AgentBar`, `erikrole/agentbar-releases`, and `erikrole/PowerBar`, and disabling both PowerBar workflows. All three repositories are archived. PowerBar's **Release macOS app** and **Tests** workflows are disabled. Repository visibility and final release assets are preserved.
 
 AppUpdater's active ZIP release check now covers StatBar, Tweaks, UpdateBar, SnipBar, Cutdown, and TVBar. It no longer depends on the two retired feeds. Historical audit, adoption, platform, and publication reports retain their original release evidence. All active hosts and the shared package retain the macOS 27 minimum.
 
