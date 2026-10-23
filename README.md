@@ -133,7 +133,7 @@ Edit the generated file before publishing: commit subjects are a starting point,
 `RequestQuitTests` run a real AppKit host (`QuitProbe`, a `.terminateLater` delegate that replies from a task): `requestQuit()`
 exits, and `NSApp.terminate` called inside a task still hangs (the negative control).
 
-`swift test` (offline) and `scripts/test-release-notes.sh`. `APPUPDATER_LIVE=1 swift test` also downloads the real Offload DMG and StatBar, PowerBar, Tweaks, and UpdateBar ZIPs, then runs the full
+`swift test` (offline) and `scripts/test-release-notes.sh`. `APPUPDATER_LIVE=1 swift test` also downloads the real Offload DMG and all eight adopted hosts’ ZIPs, then runs the full
 verification path without installing or launching them. Optional `APPUPDATER_GITHUB_TOKEN` read-only authentication
 avoids shared unauthenticated API limits; never save a token in the repository.
 
@@ -142,3 +142,5 @@ concurrent cleanup exclusion, interrupted-swap recovery, missing-backup rollback
 quit fallback, strict numeric versions, and web-only release-note links. The real signed-app test uses a scratch copy of
 `/Applications/Offload.app` when present; it never changes the installed copy. AppKit, code-signing services, and normal
 user cache access are required for the full suite.
+
+All eight host releases were [published and verified on October 23, 2026](docs/releases-2026-10-23.md).

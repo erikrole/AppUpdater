@@ -1,7 +1,7 @@
 # AppUpdater
 
 Swift 6 package, macOS 27, AppKit only, no third-party dependencies. `swift build` / `swift test`
-(`APPUPDATER_LIVE=1` adds live Offload DMG and four public ZIP verification checks). `swift run UpdaterPreview` shows the window.
+(`APPUPDATER_LIVE=1` adds live Offload DMG and eight public ZIP verification checks). `swift run UpdaterPreview` shows the window.
 
 - `ReleaseInfo` parses GitHub's latest-release JSON; `AppUpdater` decides (rate limit, skip, version) and installs;
   `UpdateInstaller` downloads, verifies, swaps and relaunches; `UpdateWindowController` is the splash.

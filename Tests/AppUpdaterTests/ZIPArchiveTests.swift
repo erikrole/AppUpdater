@@ -150,11 +150,13 @@ final class ZIPArchiveTests: XCTestCase {
 
     @MainActor func testLivePublishedZIPsVerifyWithoutInstalling() async throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["APPUPDATER_LIVE"] == "1")
-        for name in ["StatBar", "PowerBar", "Tweaks", "UpdateBar"] {
+        for name in ["StatBar", "PowerBar", "Tweaks", "UpdateBar", "AgentBar", "SnipBar", "Cutdown", "TVBar"] {
+            let repository = ["AgentBar", "SnipBar", "Cutdown", "TVBar"].contains(name)
+                ? "erikrole/\(name.lowercased())-releases" : "erikrole/\(name)"
             let root = try scratch()
-            let data = try await liveReleaseData(repository: "erikrole/\(name)")
+            let data = try await liveReleaseData(repository: repository)
             let release = try XCTUnwrap(ReleaseInfo.parse(data, assetName: "\(name).zip"), name)
-            let configuration = AppUpdater.Configuration(repository: "erikrole/\(name)", assetName: "\(name).zip",
+            let configuration = AppUpdater.Configuration(repository: repository, assetName: "\(name).zip",
                 bundleIdentifier: "com.erole.\(name)", appURL: root.appending(path: "\(name).app"), currentVersion: "0")
             let prepared = try await UpdateInstaller.prepare(release: release, destination: configuration.appURL, configuration: configuration) { _ in }
             defer {
@@ -163,6 +165,9 @@ final class ZIPArchiveTests: XCTestCase {
                 withExtendedLifetime(prepared.lease) {}
             }
             XCTAssertTrue(FileManager.default.fileExists(atPath: prepared.staged.path))
+            let plist = try Data(contentsOf: prepared.staged.appending(path: "Contents/Info.plist"))
+            let info = try XCTUnwrap(try PropertyListSerialization.propertyList(from: plist, format: nil) as? [String: Any])
+            XCTAssertEqual(info["LSMinimumSystemVersion"] as? String, "27.0", name)
         }
     }
 }
