@@ -6,7 +6,7 @@ jobs:
   test:
     runs-on: xcode-27
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: swift build -Xswiftc -warnings-as-errors
       - run: swift test -Xswiftc -warnings-as-errors
       - run: scripts/test-release-notes.sh
