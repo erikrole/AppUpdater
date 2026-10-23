@@ -17,6 +17,7 @@ git commit -q --allow-empty -m "Add one-click updates" -m "New versions show up 
 Co-Authored-By: Someone <s@example.com>"
 git commit -q --allow-empty -m "wip"
 git commit -q --allow-empty -m "Fix wrapping in the notes card."
+git commit -q --allow-empty -m "wip release cleanup"
 
 notes="$("$here/release-notes.sh")"
 printf '%s\n' "$notes" | grep -q '^## Fix wrapping in the notes card\.$' || fail "headline is the newest subject"

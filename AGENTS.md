@@ -7,4 +7,12 @@ Swift 6 package, macOS 27, AppKit only, no third-party dependencies. `swift buil
   `UpdateInstaller` downloads, verifies, swaps and relaunches; `UpdateWindowController` is the splash.
 - Install logic derives from UpdateBar's `DMGInstaller` (Team ID T26T3G8C7Q). Keep the verify-before-swap and
   backup/rollback order; never install an unverified app.
+- `prepare` returns a verified staged app, work directory, and installation lease. Retain the lease through cleanup,
+  rollback, and the pending quit; pass it to the relaunch helper. Never unlink the persistent lock file or explicitly
+  unlock its shared flock; closing the last inherited descriptor releases it. Refuse terminal app symlinks.
+- Observe cancellation before swapping. After mounting, register detach before observing cancellation. Let active tools
+  finish before removing their files. Rollback must preserve a recoverable copy and report restoration failures.
+- Quit fallback must recheck cancellation, its pending-install token, and all windows' sheets after awaiting host saves.
+- Run `swift build -Xswiftc -warnings-as-errors`, `swift test -Xswiftc -warnings-as-errors`, and
+  `scripts/test-release-notes.sh`. The full suite needs normal AppKit/signature-service and user-cache access.
 - Apps integrate through their own repos; do not edit Fetch or Offload from here.

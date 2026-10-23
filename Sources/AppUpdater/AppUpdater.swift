@@ -266,15 +266,40 @@ public final class AppUpdater {
     }
 
     /// The relaunch helper that is waiting for this app to quit, with the folders it will swap.
-    private var pendingRelaunch: (helper: pid_t, destination: URL, backup: URL)?
+    private struct PendingRelaunch {
+        var helper: pid_t?
+        let destination: URL
+        let backup: URL
+        let lease: UpdateInstaller.InstallationLock
+        let token = UUID()
+    }
+    private var pendingRelaunch: PendingRelaunch?
 
     /// The quit was cancelled (a save sheet answered "Keep Open", say) and the person no longer wants to wait: ends the helper,
     /// puts the previous version back and lets the update be started again. Does nothing when no relaunch is waiting.
     public func cancelPendingQuit() {
-        guard let pending = pendingRelaunch else { return }
+        do { try cancelPendingQuitAndRestore() }
+        catch { Self.log.error("Couldn't restore the previous app: \(error.localizedDescription, privacy: .public)") }
+    }
+
+    func cancelPendingQuitAndRestore() throws {
+        guard var pending = pendingRelaunch else { return }
+        // Invalidate the fallback before touching the helper. If restoration fails, keep the lease and
+        // backup for another attempt, but never signal a stale PID or force the host to quit.
+        if let helper = pending.helper {
+            var result: pid_t
+            repeat { result = waitpid(helper, nil, WNOHANG) } while result < 0 && errno == EINTR
+            if result == 0 {
+                guard kill(helper, SIGKILL) == 0 || errno == ESRCH else {
+                    throw UpdateInstaller.Failure(message: "Couldn't stop the relaunch helper. Try again before restoring the previous app.")
+                }
+                while waitpid(helper, nil, 0) < 0 && errno == EINTR {}
+            }
+        }
+        pending.helper = nil
+        pendingRelaunch = pending
+        try UpdateInstaller.rollback(destination: pending.destination, backup: pending.backup)
         pendingRelaunch = nil
-        kill(pending.helper, SIGKILL)
-        UpdateInstaller.rollback(destination: pending.destination, backup: pending.backup)
         defaults.removeObject(forKey: Keys.justUpdated)
         decision = .none
         isInstalling = false
@@ -291,11 +316,27 @@ public final class AppUpdater {
     /// `requestQuit()`, then, if the app is still open after `wait` with no alert or sheet up and `safeToExit` says nothing would be
     /// lost, exits the process so a waiting relaunch helper can open the new version. Returns only if the app stays open.
     @MainActor public static func requestQuit(fallbackAfter wait: Duration, safeToExit: (@MainActor () async -> Bool)?) async {
+        await requestQuit(fallbackAfter: wait, safeToExit: safeToExit, stillPending: { true })
+    }
+
+    @MainActor static func requestQuit(
+        fallbackAfter wait: Duration,
+        safeToExit: (@MainActor () async -> Bool)?,
+        stillPending: @MainActor () -> Bool
+    ) async {
+        guard !Task.isCancelled, stillPending() else { return }
         requestQuit()
-        try? await Task.sleep(for: wait)
-        guard NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil, let safeToExit, await safeToExit() else { return }
+        do { try await Task.sleep(for: wait) } catch { return }
+        guard !Task.isCancelled, stillPending(), !hasPendingDialog, let safeToExit, await safeToExit() else { return }
+        // Saving yields the main actor: a sheet may open, the task may be cancelled, or Don't Wait
+        // may restore the old app while the host is flushing its state.
+        guard !Task.isCancelled, stillPending(), !hasPendingDialog else { return }
         log.error("the app was still open \(wait.components.seconds) s after the quit request with nothing pending; exiting so the update can open")
         exit(0)
+    }
+
+    private static var hasPendingDialog: Bool {
+        NSApp.modalWindow != nil || NSApp.windows.contains { $0.attachedSheet != nil || $0.isSheet }
     }
 
     @MainActor public static func requestQuit() {
@@ -388,13 +429,18 @@ public final class AppUpdater {
         let prepared = try await UpdateInstaller.prepare(release: release, destination: destination, configuration: configuration) { fraction in
             Task { @MainActor in progress(fraction) }
         }
-        defer { try? FileManager.default.removeItem(at: prepared.workDirectory) }
+        defer {
+            try? FileManager.default.removeItem(at: prepared.staged)
+            try? FileManager.default.removeItem(at: prepared.workDirectory)
+            withExtendedLifetime(prepared.lease) {}
+        }
 
         // The download can take minutes; the app may have started something since.
+        try Task.checkCancellation()
         if let reason = configuration.busyReason() {
-            try? FileManager.default.removeItem(at: prepared.staged)
             throw UpdateInstaller.Failure(message: reason)
         }
+        try Task.checkCancellation()
         status("Installing…")
         let backup: URL
         do {
@@ -405,10 +451,10 @@ public final class AppUpdater {
         }
         rememberInstall(of: release)
         do {
-            let helper = try UpdateInstaller.scheduleRelaunch(destination: destination, backup: backup)
-            pendingRelaunch = (helper, destination, backup)
+            let helper = try UpdateInstaller.scheduleRelaunch(destination: destination, backup: backup, lease: prepared.lease)
+            pendingRelaunch = PendingRelaunch(helper: helper, destination: destination, backup: backup, lease: prepared.lease)
         } catch {
-            UpdateInstaller.rollback(destination: destination, backup: backup)
+            try UpdateInstaller.rollback(destination: destination, backup: backup)
             defaults.removeObject(forKey: Keys.justUpdated)
             throw UpdateInstaller.Failure(message: "Couldn't finish the update, so the previous version was kept. \(error.localizedDescription)")
         }
@@ -416,8 +462,11 @@ public final class AppUpdater {
         status("Relaunching…")
         Self.log.info("update installed; asking the app to quit")
         // Still here afterwards: the app asked to finish something first (a save sheet, say) or its quit stalled.
-        await Self.requestQuit(fallbackAfter: .seconds(5), safeToExit: configuration.safeToExit)
-        guard pendingRelaunch != nil else { return }
+        let token = pendingRelaunch?.token
+        await Self.requestQuit(fallbackAfter: .seconds(5), safeToExit: configuration.safeToExit) { [weak self] in
+            self?.pendingRelaunch?.token == token && self?.pendingRelaunch?.helper != nil
+        }
+        guard pendingRelaunch?.token == token, pendingRelaunch?.helper != nil else { return }
         Self.log.info("the app is still open after the quit request; waiting for it")
         status("Finish up in \(configuration.displayName). The update opens as soon as it quits.")
         quitPending()

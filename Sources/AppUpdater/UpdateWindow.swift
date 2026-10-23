@@ -387,9 +387,14 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func laterTapped() {
         if working, installing, laterButton.title == "Don't Wait" {
-            updater.cancelPendingQuit()
-            installing = false
-            setWorking(false, status: "Update stopped. \(updater.configuration.displayName) was not changed.")
+            do {
+                try updater.cancelPendingQuitAndRestore()
+                installing = false
+                setWorking(false, status: "Update stopped. \(updater.configuration.displayName) was restored.")
+            } catch {
+                statusLabel.stringValue = error.localizedDescription
+                statusLabel.textColor = .systemOrange
+            }
             return
         }
         if working { if !installing { installTask?.cancel() }; return }
@@ -397,7 +402,7 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc private func viewTapped() {
-        if let url = mode.release.pageURL { NSWorkspace.shared.open(url) }
+        if let url = mode.release.pageURL, ["http", "https"].contains(url.scheme?.lowercased() ?? "") { NSWorkspace.shared.open(url) }
     }
 
     @objc private func skipTapped() {
@@ -415,7 +420,7 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
                 try await updater.install(
                     release,
                     progress: { fraction in
-                        guard fraction >= self.progress.doubleValue else { return }
+                        guard self.working, !self.installing, fraction.isFinite, fraction >= self.progress.doubleValue else { return }
                         self.progress.doubleValue = fraction
                         self.statusLabel.stringValue = "Downloading… \(Int(fraction * 100))%"
                     },
@@ -433,8 +438,9 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
                     }
                 )
             } catch is CancellationError {
+                installing = false
                 setWorking(false, status: "")
-                statusLabel.isHidden = true
+                window?.close()
             } catch {
                 installing = false
                 setWorking(false, status: error.localizedDescription)

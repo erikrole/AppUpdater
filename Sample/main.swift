@@ -23,7 +23,7 @@ app.setActivationPolicy(.regular)
             // Press the splash's real primary button once it is up, so the whole flow runs unattended.
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(3))
-                func button(in view: NSView) -> NSButton? {
+                @MainActor func button(in view: NSView) -> NSButton? {
                     if let button = view as? NSButton, button.title == "Update and Relaunch" { return button }
                     for sub in view.subviews { if let found = button(in: sub) { return found } }
                     return nil

@@ -32,6 +32,10 @@ Optional configuration (all have defaults):
 - `updater.isInstalling` lets `applicationShouldTerminate` avoid quitting mid-install. Keep the `AppUpdater` instance
   alive for the life of the app (a property on your app delegate).
 
+For release builds, pin a reviewed commit or tag in the host's package configuration and commit its `Package.resolved`.
+Updating this package's `main` does not update an already installed app: each host must resolve the new revision, pass its
+own checks, and ship a new build. See [the October 2026 audit](docs/audit-2026-10-23.md) for the local adoption inventory.
+
 Preview the window: `swift run UpdaterPreview`.
 
 ## What it does
@@ -48,8 +52,15 @@ Preview the window: `swift run UpdaterPreview`.
   the update waits for it. Leftover staging copies and backups are swept at the next launch. The signature check also
   requires an Apple-anchored certificate for the Team ID and that the bundle version matches the release tag.
   Nothing is installed unless every check passes.
+- **Recovery and cancellation:** a per-app file lock excludes other updater instances from preparation, cleanup, and
+  rollback. The relaunch helper inherits the lock until it finishes; the small hidden `.AppName.app.updater-lock` file stays
+  beside the app and must not be deleted. Cleanup restores a surviving backup if a swap was interrupted between renames.
+  Rollback preserves the installed app when the backup is missing and reports restoration failures. Cancel closes the
+  splash after the active preparation tool finishes and its temporary files and mount are cleaned up; it never proceeds
+  to the swap. Downloads allow 60 seconds of inactivity and 15 minutes overall, and require HTTPS from the first request.
 - **After updating:** by default the new version opens once with the same window in "what changed" mode. Set `postUpdate: .quiet` in the configuration for no window at all; the `.installed` event still fires, so the host can show its own note.
 - Refuses to update a copy running from a disk image or a translocated path; asks to move it to Applications.
+  A destination that is itself a symbolic link is also refused; open the original app to update it.
 
 ## Quitting for the update
 
@@ -57,10 +68,12 @@ After the swap, AppUpdater asks the app to quit with `AppUpdater.requestQuit()`.
 not from inside the install task. This matters if your `applicationShouldTerminate` returns `.terminateLater` and replies from
 a Swift task (to save first): called from inside a main-actor task, `terminate:` blocks that task's job, so your reply task can
 never run and the update hangs on "Relaunching…". If you start a quit yourself from a task, use `requestQuit()` too.
-If the app is still open 3 seconds later the splash says to finish up and offers **Don't Wait**: it ends the relaunch helper,
+If the app is still open 5 seconds later the splash says to finish up and offers **Don't Wait**: it ends the relaunch helper,
 puts the previous version back (`cancelPendingQuit()`) and lets the update be started again.
+If restoration fails, the splash shows the error and preserves the backup for another attempt.
 
 **Stalled quit:** if the app is still open 5 s after the quit request, no alert or sheet is up, and `Configuration.safeToExit` returns true (flush anything unsaved first), AppUpdater exits the process so the relaunch helper can open the new version. Without `safeToExit` it never forces an exit.
+Cancellation, pending update ownership, and sheets on every app window are checked again after the asynchronous save finishes.
 
 ## Telemetry hook
 
@@ -116,3 +129,9 @@ exits, and `NSApp.terminate` called inside a task still hangs (the negative cont
 
 `swift test` (offline) and `scripts/test-release-notes.sh`. `APPUPDATER_LIVE=1 swift test` also downloads the real Offload release and runs the full
 verify path against it.
+
+`swift build -Xswiftc -warnings-as-errors` checks every package product. Tests include the helper's inherited lock,
+concurrent cleanup exclusion, interrupted-swap recovery, missing-backup rollback, cancellation during preparation and
+quit fallback, strict numeric versions, and web-only release-note links. The real signed-app test uses a scratch copy of
+`/Applications/Offload.app` when present; it never changes the installed copy. AppKit, code-signing services, and normal
+user cache access are required for the full suite.

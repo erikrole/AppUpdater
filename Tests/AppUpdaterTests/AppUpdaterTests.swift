@@ -112,7 +112,7 @@ final class InstallerTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: app.appending(path: "v"), encoding: .utf8), "new")
         XCTAssertEqual(try String(contentsOf: backup.appending(path: "v"), encoding: .utf8), "old")
 
-        UpdateInstaller.rollback(destination: app, backup: backup)
+        try UpdateInstaller.rollback(destination: app, backup: backup)
         XCTAssertEqual(try String(contentsOf: app.appending(path: "v"), encoding: .utf8), "old")
         XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
     }
@@ -149,16 +149,20 @@ final class InstallerTests: XCTestCase {
             appURL: dir.appending(path: "Offload.app"), currentVersion: "0.0.1"
         )
         let prepared = try await UpdateInstaller.prepare(release: release, destination: configuration.appURL, configuration: configuration) { _ in }
+        defer {
+            try? FileManager.default.removeItem(at: prepared.staged)
+            try? FileManager.default.removeItem(at: prepared.workDirectory)
+            withExtendedLifetime(prepared.lease) {}
+        }
         XCTAssertTrue(FileManager.default.fileExists(atPath: prepared.staged.path))
-        try? FileManager.default.removeItem(at: prepared.workDirectory)
 
         // A different bundle ID must be refused.
         var wrong = configuration
         wrong.bundleIdentifier = "com.example.Other"
         do {
-            _ = try await UpdateInstaller.prepare(release: release, destination: wrong.appURL, configuration: wrong) { _ in }
+            try await UpdateInstaller.verify(prepared.staged, release: release, configuration: wrong)
             XCTFail("expected refusal")
-        } catch {}
+        } catch { XCTAssertTrue((error as? UpdateInstaller.Failure)?.message.contains("isn't this app") == true) }
     }
 }
 
@@ -192,7 +196,7 @@ final class NotesTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appending(path: "AppUpdaterNotes-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
         let defaults = UserDefaults(suiteName: "AppUpdaterTests-\(UUID().uuidString)")!
-        var configuration = AppUpdater.Configuration(repository: "a/b", assetName: "A.dmg", bundleIdentifier: "com.x.A", currentVersion: "1.0")
+        var configuration = AppUpdater.Configuration(repository: "a/b", assetName: "A.dmg", bundleIdentifier: "com.x.NotesTests-\(UUID().uuidString)", currentVersion: "1.0")
         let updater = AppUpdater(configuration, defaults: defaults)
         try? FileManager.default.removeItem(at: updater.notesCache.directory)
         let release = ReleaseInfo(version: "2.0", notes: "", downloadURL: URL(string: "https://github.com/a/b")!)
@@ -250,7 +254,7 @@ final class HardeningTests: XCTestCase {
         for name in names { try FileManager.default.createDirectory(at: dir.appending(path: name), withIntermediateDirectories: true) }
         UpdateInstaller.sweepLeftovers(for: dir.appending(path: "X.app"))
         let left = Set(try FileManager.default.contentsOfDirectory(atPath: dir.path))
-        XCTAssertEqual(left, ["X.app", "Y.app", ".Y.app.backup"])
+        XCTAssertEqual(left, ["X.app", "Y.app", ".Y.app.backup", ".X.app.updater-lock"])
     }
 
     func testSwapSucceedsWithStaleBackup() throws {
@@ -631,6 +635,18 @@ final class RequestQuitTests: XCTestCase {
 
     func testAStalledQuitStaysOpenWhenTheHostSaysItIsNotSafe() throws {
         XCTAssertFalse(try exits(["--stalled", "--not-safe"], within: 6))
+    }
+
+    func testCancelledFallbackNeverForcesExit() throws {
+        XCTAssertFalse(try exits(["--stalled", "--cancel-fallback"], within: 4))
+    }
+
+    func testCancellationWhileHostSavesNeverForcesExit() throws {
+        XCTAssertFalse(try exits(["--stalled", "--cancel-during-save"], within: 4))
+    }
+
+    func testSheetOpenedWhileHostSavesPreventsForcedExit() throws {
+        XCTAssertFalse(try exits(["--stalled", "--sheet-during-save"], within: 4))
     }
 
     func testTerminateCalledInsideATaskStillHangs() throws {

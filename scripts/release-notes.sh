@@ -47,10 +47,10 @@ bullets=""
 newest_subject=""
 while IFS= read -r sha; do
   subject="$(git log -1 --format=%s "$sha")"
-  newest_subject="$subject"
   case "$(printf '%s' "$subject" | tr '[:upper:]' '[:lower:]')" in
     wip*|fixup*|squash*|"merge "*|"bump "*|"release "*) continue ;;
   esac
+  newest_subject="$subject"
   # First paragraph of the body, minus trailers, on one line.
   body="$(git log -1 --format=%b "$sha" \
     | awk 'BEGIN{p=0} /^[[:space:]]*$/ {if (p) exit; next} /^(Co-Authored-By|Signed-off-by|Generated with|🤖)/ {next} {p=1; print}' \

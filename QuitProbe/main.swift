@@ -25,10 +25,28 @@ MainActor.assumeIsolated {
     app.delegate = delegate
     app.setActivationPolicy(.prohibited)
     let direct = CommandLine.arguments.contains("--direct")
+    let cancelFallback = CommandLine.arguments.contains("--cancel-fallback")
+    let cancelDuringSave = CommandLine.arguments.contains("--cancel-during-save")
+    let sheetDuringSave = CommandLine.arguments.contains("--sheet-during-save")
+    let parent = NSWindow(contentRect: .zero, styleMask: .titled, backing: .buffered, defer: false)
+    let sheet = NSWindow(contentRect: .zero, styleMask: .titled, backing: .buffered, defer: false)
     Task { @MainActor in
         try? await Task.sleep(for: .seconds(1))
         if direct { NSApp.terminate(nil) }
-        else if stalled { await AppUpdater.requestQuit(fallbackAfter: .seconds(2), safeToExit: { safe }) }
+        else if stalled {
+            let quit = Task { @MainActor in
+                await AppUpdater.requestQuit(fallbackAfter: .seconds(2), safeToExit: {
+                    if cancelDuringSave { withUnsafeCurrentTask { $0?.cancel() } }
+                    if sheetDuringSave { parent.beginSheet(sheet) }
+                    return safe
+                })
+            }
+            if cancelFallback {
+                try? await Task.sleep(for: .milliseconds(100))
+                quit.cancel()
+            }
+            await quit.value
+        }
         else { AppUpdater.requestQuit() }
     }
     app.run()
