@@ -1,6 +1,6 @@
 # AppUpdater
 
-A small, dependency-free AppKit updater for Erik's own macOS apps (Swift 6, macOS 27). Apps check a public GitHub
+A small, dependency-free AppKit updater for Erik's own macOS apps (Swift 6, macOS 26 or later). Apps check a public GitHub
 releases repository on launch and, when there's an update, show a splash with the release notes and a one-click
 **Update and Relaunch**. No Sparkle, no appcast, no helper tool.
 
@@ -144,4 +144,4 @@ quit fallback, strict numeric versions, and web-only release-note links. The rea
 user cache access are required for the full suite.
 
 All eight host releases were [published and verified on October 23, 2026](docs/releases-2026-10-23.md).
-AgentBar and PowerBar were subsequently [retired](docs/retirement-2026-10-23.md); six of those ZIP hosts remain active. The macOS 27 minimum is unchanged.
+AgentBar and PowerBar were subsequently [retired](docs/retirement-2026-10-23.md); six of those ZIP hosts remain active. The minimum was lowered to macOS 26 (Tahoe) on October 24, 2026; no 27-only APIs are used.
