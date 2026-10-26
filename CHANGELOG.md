@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-10-26
+
+- Add update channels: `Configuration.channel` (`.production` by default, `.beta`). Beta lists releases, accepts prereleases and picks the
+  newest version with the asset. Versions may be `X.Y.Z-beta.N`, ordered below `X.Y.Z`. Production never offers a beta, and no channel downgrades.
+
 ## 2026-10-23
 
 - Support signed ZIP releases alongside DMGs, including versioned native-architecture asset names and wrapped apps.
