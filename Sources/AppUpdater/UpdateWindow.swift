@@ -45,7 +45,7 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         window.contentView = content
         content.widthAnchor.constraint(equalToConstant: Self.windowWidth).isActive = true
         content.layoutSubtreeIfNeeded()
-        window.setContentSize(NSSize(width: Self.windowWidth, height: max(content.fittingSize.height, 380)))
+        window.setContentSize(NSSize(width: Self.windowWidth, height: max(content.fittingSize.height, 240)))
         window.center()
     }
 
@@ -277,7 +277,7 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
             scroll.topAnchor.constraint(equalTo: card.topAnchor),
             scroll.bottomAnchor.constraint(equalTo: card.bottomAnchor),
             document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
-            card.heightAnchor.constraint(greaterThanOrEqualToConstant: 150),
+            card.heightAnchor.constraint(greaterThanOrEqualToConstant: 60),
             card.heightAnchor.constraint(lessThanOrEqualToConstant: 400),
         ])
         // Fit the notes when they are short; scroll when they are long.
