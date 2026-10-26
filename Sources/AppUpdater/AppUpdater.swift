@@ -41,6 +41,11 @@ public final class AppUpdater {
     /// What opens after an update has installed and the new version launches.
     public enum PostUpdate: Sendable { case window, quiet }
 
+    /// Which releases a check may offer. Production is every app's default: stable releases only (`releases/latest`).
+    /// Beta also offers prereleases (`X.Y.Z-beta.N`) and picks the newest release of either kind. An update is only ever
+    /// offered when it is newer than the installed version, so leaving beta never downgrades.
+    public enum UpdateChannel: String, Sendable { case production, beta }
+
     public struct Configuration: @unchecked Sendable {
         /// `owner/name` of the public releases repository.
         public var repository: String
@@ -71,6 +76,8 @@ public final class AppUpdater {
         /// Return true only when exiting now loses nothing: flush anything unsaved first. AppUpdater then exits the process so the
         /// relaunch helper can open the new version. nil never forces an exit.
         public var safeToExit: (@MainActor @Sendable () async -> Bool)?
+        /// Read at every check, so a Settings switch takes effect on the next check. Defaults to production.
+        public var channel: @Sendable () -> UpdateChannel
 
         public init(
             repository: String,
@@ -87,9 +94,11 @@ public final class AppUpdater {
             fallbackNotes: String? = nil,
             postUpdate: PostUpdate = .window,
             safeToExit: (@MainActor @Sendable () async -> Bool)? = nil,
+            channel: @escaping @Sendable () -> UpdateChannel = { .production },
             onEvent: (@MainActor @Sendable (Event) -> Void)? = nil
         ) {
             self.postUpdate = postUpdate
+            self.channel = channel
             self.safeToExit = safeToExit
             self.onEvent = onEvent
             self.style = style
@@ -194,13 +203,18 @@ public final class AppUpdater {
            now.timeIntervalSince(last) < configuration.minimumCheckInterval {
             return .tooSoon
         }
+        let beta = configuration.channel() == .beta
         guard configuration.repository.range(of: #"^[\w.-]+/[\w.-]+$"#, options: .regularExpression) != nil,
-              let url = URL(string: "https://api.github.com/repos/\(configuration.repository)/releases/latest") else {
+              let url = URL(string: "https://api.github.com/repos/\(configuration.repository)/releases" + (beta ? "?per_page=20" : "/latest")) else {
             return .failed("Bad repository name.")
         }
         do {
             let (data, status) = try await fetch(url)
-            guard status == 200, let release = ReleaseInfo.parse(data, assetName: configuration.assetName) else {
+            let found = status == 200
+                ? (beta ? ReleaseInfo.newest(inList: data, assetName: configuration.assetName, allowPrerelease: true)
+                        : ReleaseInfo.parse(data, assetName: configuration.assetName))
+                : nil
+            guard let release = found else {
                 return .failed(status == 200 ? "Couldn't read the release." : "GitHub returned status \(status).")
             }
             defaults.set(now, forKey: Keys.lastCheck)

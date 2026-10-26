@@ -68,6 +68,16 @@ Preview the window: `swift run UpdaterPreview`.
 - Refuses to update a copy running from a disk image or a translocated path; asks to move it to Applications.
   A destination that is itself a symbolic link is also refused; open the original app to update it.
 
+## Channels (production and beta)
+
+`Configuration.channel` is a closure read at every check (default `{ .production }`, so existing apps are unchanged).
+Production uses `releases/latest` and ignores drafts, GitHub prereleases and any `-beta.N` version. Beta lists
+`releases?per_page=20`, skips drafts, accepts prereleases and offers the highest version that has the asset. An update is
+offered only when it is newer than the installed version, so turning beta off never downgrades: a beta Mac stays where it is
+until a newer production release. Versions are `X.Y.Z` or `X.Y.Z-beta.N`; `3.0.0-beta.1 < 3.0.0-beta.2 < 3.0.0`. Publish a beta
+as a GitHub prerelease with `--latest=false` so `releases/latest/download/<asset>` keeps serving production. Hosts decide how a
+person opts in (Offload: `updates.beta` in UserDefaults, a Settings switch).
+
 ## Quitting for the update
 
 After the swap, AppUpdater asks the app to quit with `AppUpdater.requestQuit()`. It calls `terminate:` from a run-loop timer,
