@@ -78,6 +78,11 @@ public final class AppUpdater {
         public var safeToExit: (@MainActor @Sendable () async -> Bool)?
         /// Read at every check, so a Settings switch takes effect on the next check. Defaults to production.
         public var channel: @Sendable () -> UpdateChannel
+        /// Read at every launch check. When true (the default), a stable update found by a launch check installs itself,
+        /// quietly and at once, and the new version shows what's new when it opens. Beta releases, manual checks, a
+        /// busy host (`busyReason`), a skipped version and a version that has failed `maxAutoInstallFailures` times
+        /// still open the splash instead. Hosts wire this to a Settings switch.
+        public var autoInstall: @Sendable () -> Bool
 
         public init(
             repository: String,
@@ -95,10 +100,12 @@ public final class AppUpdater {
             postUpdate: PostUpdate = .window,
             safeToExit: (@MainActor @Sendable () async -> Bool)? = nil,
             channel: @escaping @Sendable () -> UpdateChannel = { .production },
+            autoInstall: @escaping @Sendable () -> Bool = { true },
             onEvent: (@MainActor @Sendable (Event) -> Void)? = nil
         ) {
             self.postUpdate = postUpdate
             self.channel = channel
+            self.autoInstall = autoInstall
             self.safeToExit = safeToExit
             self.onEvent = onEvent
             self.style = style
@@ -187,7 +194,11 @@ public final class AppUpdater {
         defer { checking = false }
         switch await evaluate(userInitiated: userInitiated) {
         case let .available(release):
-            present(.available(release), trigger: trigger ?? (userInitiated ? .manual : .launch))
+            if !userInitiated, shouldAutoInstall(release) {
+                await autoInstall(release)
+            } else {
+                present(.available(release), trigger: trigger ?? (userInitiated ? .manual : .launch))
+            }
         case .upToDate:
             if userInitiated { alert("\(configuration.displayName) is up to date.", "You have version \(configuration.currentVersion), the latest release.") }
         case .failed:
@@ -224,6 +235,39 @@ public final class AppUpdater {
         } catch {
             return .failed(error.localizedDescription)
         }
+    }
+
+    /// A version that fails to install or to launch this many times stops installing itself and asks instead.
+    static let maxAutoInstallFailures = 2
+
+    /// Whether a launch check may install `release` without asking: opted in, stable, not failing, host idle.
+    func shouldAutoInstall(_ release: ReleaseInfo) -> Bool {
+        configuration.autoInstall()
+            && !release.isPrerelease && !ReleaseInfo.isBeta(release.version)
+            && failureCount(for: release.version) < Self.maxAutoInstallFailures
+            && configuration.busyReason() == nil
+    }
+
+    /// Installs without a window. A failure is remembered and stays quiet: the next launch retries, and after
+    /// `maxAutoInstallFailures` the splash is offered instead.
+    private func autoInstall(_ release: ReleaseInfo) async {
+        do {
+            try await install(release, progress: { _ in }, status: { _ in })
+        } catch is CancellationError {
+        } catch {
+            recordFailure(of: release.version)
+            Self.log.error("automatic update to \(release.version, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    func failureCount(for version: String) -> Int {
+        guard let saved = defaults.dictionary(forKey: Keys.failed), let v = saved["version"] as? String,
+              ReleaseInfo.versionsMatch(v, version) else { return 0 }
+        return saved["count"] as? Int ?? 0
+    }
+
+    func recordFailure(of version: String) {
+        defaults.set(["version": version, "count": failureCount(for: version) + 1] as [String: Any], forKey: Keys.failed)
     }
 
     /// Notes to show: the release's own, else the last ones cached for that version, else the host's fallback,
@@ -264,7 +308,12 @@ public final class AppUpdater {
         guard let saved = defaults.dictionary(forKey: Keys.justUpdated),
               let version = saved["version"] as? String else { return false }
         defaults.removeObject(forKey: Keys.justUpdated)
-        guard version == configuration.currentVersion else { return false }
+        guard version == configuration.currentVersion else {
+            // The relaunch helper put the old version back: that release didn't open, so count it against auto-install.
+            recordFailure(of: version)
+            return false
+        }
+        defaults.removeObject(forKey: Keys.failed)
         let release = ReleaseInfo(
             version: version,
             notes: saved["notes"] as? String ?? "",
@@ -394,6 +443,7 @@ public final class AppUpdater {
         static let lastCheck = "AppUpdater.lastCheck"
         static let skipped = "AppUpdater.skippedVersion"
         static let justUpdated = "AppUpdater.justUpdated"
+        static let failed = "AppUpdater.failedUpdate"
     }
 
     // MARK: - Install

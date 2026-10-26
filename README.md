@@ -24,6 +24,9 @@ updater.checkNow()
 Optional configuration (all have defaults):
 - `style: .init(accentColor:, kickerColor:, icon:, title:, primaryButtonTitle:)` dresses the window in the host's colours
   (default: system accent). The primary button is a filled accent pill; Later and Skip are quiet text buttons.
+- `autoInstall: { settings.autoUpdate }` (default `{ true }`) lets a launch check install a stable update without a window; wire it to a Settings switch.
+  Betas, manual checks, busy hosts and versions that failed twice still show the splash.
+- `channel: { settings.beta ? .beta : .production }` picks stable or beta releases.
 - `busyReason: { model.isCopying ? "Offload is busy with a copy." : nil }` holds the update back and shows the reason.
   It is checked before the download and again right before the swap.
 - `fallbackNotes: "…"` is shown when a release has no notes and none were cached from an earlier fetch. Notes are cached

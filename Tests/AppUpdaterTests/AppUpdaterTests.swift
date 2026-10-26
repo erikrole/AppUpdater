@@ -496,7 +496,7 @@ final class EventTests: XCTestCase {
         """
         let updater = AppUpdater(
             .init(repository: "a/b", assetName: "A.dmg", bundleIdentifier: "com.x.A", appURL: FileManager.default.temporaryDirectory.appending(path: "Nope-\(UUID().uuidString).app"),
-                  currentVersion: version, busyReason: { busy }, onEvent: { event in log.events.append(event) }),
+                  currentVersion: version, busyReason: { busy }, autoInstall: { false }, onEvent: { event in log.events.append(event) }),
             defaults: defaults ?? UserDefaults(suiteName: "AppUpdaterTests-\(UUID().uuidString)")!
         )
         updater.fetch = { _ in (Data(json.utf8), 200) }

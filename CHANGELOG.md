@@ -4,6 +4,9 @@
 
 - Add update channels: `Configuration.channel` (`.production` by default, `.beta`). Beta lists releases, accepts prereleases and picks the
   newest version with the asset. Versions may be `X.Y.Z-beta.N`, ordered below `X.Y.Z`. Production never offers a beta, and no channel downgrades.
+- Add automatic install, on by default: `Configuration.autoInstall` (read each launch). A launch check installs a stable update quietly, and the new
+  version shows What's New. Beta releases, manual checks, a busy host, skipped versions and a version that failed twice (install error, or the
+  relaunch helper restoring the old app) open the splash instead.
 
 ## 2026-10-23
 
