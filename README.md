@@ -158,3 +158,9 @@ user cache access are required for the full suite.
 
 All eight host releases were [published and verified on October 23, 2026](docs/releases-2026-10-23.md).
 AgentBar and PowerBar were subsequently [retired](docs/retirement-2026-10-23.md); six of those ZIP hosts remain active. The minimum was lowered to macOS 26 (Tahoe) on October 24, 2026; no 27-only APIs are used.
+
+## Public update-check fallback
+
+Stable checks use GitHub's API normally. If it returns 403 or 429, the updater resolves the same public repository's latest stable release page and probes a tag-anchored asset with HEAD. Requests stay HTTPS and verified apps still pass the same team, bundle-ID, version, signature and Gatekeeper checks. Failed discovery stays a failure, with the actual reason and a View Releases button. It never guesses that the app is current. Public probes use no account credentials or cookies; cached real notes remain available when the API cannot supply notes.
+
+For a local signed-app fixture, set `APPUPDATER_SIGNED_APP=/Applications/Fetch.app`. Enable `APPUPDATER_FALLBACK_LIVE=1` for the opt-in public-web fallback check.

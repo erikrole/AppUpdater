@@ -16,3 +16,5 @@ Further work to evaluate:
 - A startup health acknowledgement before deleting the backup. Currently the helper confirms LaunchServices accepted
   `open`, then waits two seconds; it cannot detect a crash after launch was accepted.
 - CI runs the offline suite on the macOS 27 `xcode-27` image. Live download verification remains opt-in.
+
+Stable release checks now tolerate exhausted shared-network GitHub API quotas via verified public web discovery. Fetch adopts a compatibility backport on its e1f5004 pin; other hosts receive this change when they update their pins.

@@ -394,7 +394,7 @@ final class NestedNotesTests: XCTestCase {
 @MainActor
 final class RealSignedVerifyTests: XCTestCase {
     private func scratchCopyOfOffload() throws -> URL {
-        let source = URL(filePath: "/Applications/Offload.app")
+        let source = URL(filePath: ProcessInfo.processInfo.environment["APPUPDATER_SIGNED_APP"] ?? "/Applications/Offload.app")
         try XCTSkipUnless(FileManager.default.fileExists(atPath: source.path))
         let dir = FileManager.default.temporaryDirectory.appending(path: "AppUpdaterReal-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -408,7 +408,7 @@ final class RealSignedVerifyTests: XCTestCase {
         let app = try scratchCopyOfOffload()
         let built = Bundle(url: app)?.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
         let url = URL(string: "https://github.com/erikrole/offload-releases")!
-        var configuration = AppUpdater.Configuration(repository: "erikrole/offload-releases", assetName: "Offload.dmg", bundleIdentifier: "com.erole.Offload", currentVersion: "1.0")
+        var configuration = AppUpdater.Configuration(repository: "erikrole/offload-releases", assetName: "Offload.dmg", bundleIdentifier: Bundle(url: app)?.bundleIdentifier ?? "com.erole.Offload", currentVersion: "1.0")
         try await UpdateInstaller.verify(app, release: ReleaseInfo(version: built, notes: "", downloadURL: url), configuration: configuration)
 
         do {

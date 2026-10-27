@@ -160,11 +160,8 @@ public final class AppUpdater {
         self.defaults = defaults
         self.notesCache = NotesCache(bundleIdentifier: configuration.bundleIdentifier)
         self.fetch = { url in
-            var request = URLRequest(url: url, timeoutInterval: 12)
-            request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-            request.setValue("\(configuration.bundleIdentifier)/\(configuration.currentVersion)", forHTTPHeaderField: "User-Agent")
-            let (data, response) = try await URLSession.shared.data(for: request)
-            return (data, (response as? HTTPURLResponse)?.statusCode ?? 0)
+            try await ReleaseFetcher.fetch(url, assetName: configuration.assetName,
+                userAgent: "\(configuration.bundleIdentifier)/\(configuration.currentVersion)")
         }
     }
 
@@ -201,8 +198,8 @@ public final class AppUpdater {
             }
         case .upToDate:
             if userInitiated { alert("\(configuration.displayName) is up to date.", "You have version \(configuration.currentVersion), the latest release.") }
-        case .failed:
-            if userInitiated { alert("Couldn't check for updates.", "Make sure you're online, then try again.") }
+        case .failed(let reason):
+            if userInitiated { alert("Couldn't check for updates.", reason, offerReleases: true) }
         case .skipped, .tooSoon:
             break
         }
@@ -439,12 +436,17 @@ public final class AppUpdater {
         if case let .available(release) = mode, let trigger { emit(.shown, release, trigger: trigger) }
     }
 
-    private func alert(_ message: String, _ detail: String) {
+    private func alert(_ message: String, _ detail: String, offerReleases: Bool = false) {
         let alert = NSAlert()
         alert.messageText = message
         alert.informativeText = detail
         alert.icon = NSApp.applicationIconImage
-        alert.runModal()
+        if offerReleases { alert.addButton(withTitle: "OK"); alert.addButton(withTitle: "View Releases") }
+        if alert.runModal() == .alertSecondButtonReturn, offerReleases,
+           configuration.repository.range(of: #"^[\w.-]+/[\w.-]+$"#, options: .regularExpression) != nil,
+           let page = URL(string: "https://github.com/\(configuration.repository)/releases/latest") {
+            NSWorkspace.shared.open(page)
+        }
     }
 
     enum Keys {
