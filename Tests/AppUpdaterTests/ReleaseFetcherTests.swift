@@ -8,6 +8,18 @@ private func reply(_ url: URL, _ status: Int, headers: [String: String] = [:]) -
     HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!
 }
 
+/// Stub just the API. Web discovery and asset HEADs use the production ephemeral session/redirect delegate.
+private final class LimitedAPIProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "api.github.com" }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        client?.urlProtocol(self, didReceive: reply(request.url!, 429, headers: ["X-RateLimit-Remaining": "0"]), cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data())
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
 private actor Server {
     var requests: [URLRequest] = []
     let status: Int
@@ -128,11 +140,8 @@ private actor Server {
 
     func testLiveFallbackWithoutAPIQuota() async throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["APPUPDATER_FALLBACK_LIVE"] == "1")
-        let (data, _) = try await ReleaseFetcher.fetch(checkURL, assetName: "Fetch.dmg", userAgent: "AppUpdaterTests") { request in
-            if request.url?.host == "api.github.com" { return (Data(), reply(checkURL, 429)) }
-            let (data, response) = try await URLSession.shared.data(for: request)
-            return (data, try XCTUnwrap(response as? HTTPURLResponse))
-        }
+        let (data, _) = try await ReleaseFetcher.fetch(checkURL, assetName: "Fetch.dmg", userAgent: "AppUpdaterTests",
+                                                     protocolClasses: [LimitedAPIProtocol.self])
         let release = try XCTUnwrap(ReleaseInfo.parse(data, assetName: "Fetch.dmg"))
         XCTAssertTrue(release.downloadURL.path.contains("/releases/download/"))
         XCTAssertEqual(release.pageURL?.host, "github.com")

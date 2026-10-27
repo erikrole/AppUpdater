@@ -4,11 +4,13 @@ import Foundation
 enum ReleaseFetcher {
     typealias Sender = @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
 
-    static func fetch(_ url: URL, assetName: String, userAgent: String) async throws -> (Data, Int) {
+    static func fetch(_ url: URL, assetName: String, userAgent: String,
+                      protocolClasses: [AnyClass]? = nil) async throws -> (Data, Int) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.urlCache = nil
         configuration.urlCredentialStorage = nil
         configuration.httpShouldSetCookies = false
+        if let protocolClasses { configuration.protocolClasses = protocolClasses }
         let session = URLSession(configuration: configuration, delegate: Redirects(), delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
         return try await fetch(url, assetName: assetName, userAgent: userAgent) { request in
