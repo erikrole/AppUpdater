@@ -171,7 +171,7 @@ enum UpdateInstaller {
         defer { posix_spawn_file_actions_destroy(&actions) }
         for descriptor in Int32(0)...2 { posix_spawn_file_actions_addopen(&actions, descriptor, "/dev/null", descriptor == 0 ? O_RDONLY : O_WRONLY, 0) }
         let arguments = ["/bin/sh", "-c", script, "sh", String(pid), destination.path, backup.path]
-        var cArguments = arguments.map { strdup($0) } + [nil]
+        let cArguments = arguments.map { strdup($0) } + [nil]
         defer { cArguments.forEach { free($0) } }
         var child: pid_t = 0
         let status = posix_spawn(&child, "/bin/sh", &actions, &attributes, cArguments, environ)

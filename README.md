@@ -114,3 +114,9 @@ exits, and `NSApp.terminate` called inside a task still hangs (the negative cont
 
 `swift test` (offline) and `scripts/test-release-notes.sh`. `APPUPDATER_LIVE=1 swift test` also downloads the real Offload release and runs the full
 verify path against it.
+
+## Public update-check fallback
+
+Stable checks use GitHub's API normally. If it returns 403 or 429, the updater resolves the same public repository's latest stable release page and probes a tag-anchored asset with HEAD. Requests stay HTTPS and verified apps still pass the same team, bundle-ID, version, signature and Gatekeeper checks. Failed discovery stays a failure, with the actual reason and a View Releases button. It never guesses that the app is current. Public probes use no account credentials or cookies; cached real notes remain available when the API cannot supply notes.
+
+For a local signed-app fixture, set `APPUPDATER_SIGNED_APP=/Applications/Fetch.app`. Enable `APPUPDATER_FALLBACK_LIVE=1` for the opt-in public-web fallback check.
