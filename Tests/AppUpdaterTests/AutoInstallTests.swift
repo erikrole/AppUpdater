@@ -38,4 +38,10 @@ final class AutoInstallTests: XCTestCase {
         XCTAssertEqual(updater.failureCount(for: "2.1.0"), 1)
         XCTAssertEqual(updater.failureCount(for: "2.2.0"), 0)
     }
+
+    func testABusyAppOrNoNetworkIsNotAFailureOfTheRelease() {
+        XCTAssertFalse(AppUpdater.countsAgainstRelease(UpdateInstaller.Failure(message: "Copying.", isDeferral: true)))
+        XCTAssertFalse(AppUpdater.countsAgainstRelease(URLError(.notConnectedToInternet)))
+        XCTAssertTrue(AppUpdater.countsAgainstRelease(UpdateInstaller.Failure(message: "The downloaded update's signature is invalid, so it wasn't installed.")))
+    }
 }

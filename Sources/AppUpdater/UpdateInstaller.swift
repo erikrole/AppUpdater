@@ -6,6 +6,8 @@ import Foundation
 enum UpdateInstaller {
     struct Failure: LocalizedError {
         let message: String
+        /// The install didn't happen because the moment was wrong (the app is busy, another updater is running), not because the release failed.
+        var isDeferral = false
         var errorDescription: String? { message }
     }
 
@@ -33,7 +35,7 @@ enum UpdateInstaller {
             guard fd >= 0 else { throw Failure(message: "Couldn't lock the app for updating.") }
             guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
                 close(fd)
-                throw Failure(message: "Another copy of this app is already updating. Finish that update first.")
+                throw Failure(message: "Another copy of this app is already updating. Finish that update first.", isDeferral: true)
             }
             descriptor = fd
         }

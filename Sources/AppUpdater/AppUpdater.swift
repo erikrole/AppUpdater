@@ -255,9 +255,17 @@ public final class AppUpdater {
             try await install(release, progress: { _ in }, status: { _ in })
         } catch is CancellationError {
         } catch {
-            recordFailure(of: release.version)
+            // Only a release that failed counts against it. A busy app, another updater or no network is just a later try.
+            if Self.countsAgainstRelease(error) { recordFailure(of: release.version) }
             Self.log.error("automatic update to \(release.version, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// Whether an install error says something about the release (bad signature, wrong app, a swap that failed) and not the moment.
+    static func countsAgainstRelease(_ error: Error) -> Bool {
+        if error is URLError { return false }
+        if let failure = error as? UpdateInstaller.Failure, failure.isDeferral { return false }
+        return true
     }
 
     func failureCount(for version: String) -> Int {
@@ -487,7 +495,7 @@ public final class AppUpdater {
         status: @escaping @MainActor (String) -> Void,
         quitPending: @escaping @MainActor () -> Void
     ) async throws {
-        if let reason = configuration.busyReason() { throw UpdateInstaller.Failure(message: reason) }
+        if let reason = configuration.busyReason() { throw UpdateInstaller.Failure(message: reason, isDeferral: true) }
         isInstalling = true
         var finishedHandOff = false
         defer { if !finishedHandOff { isInstalling = false } }
@@ -506,7 +514,7 @@ public final class AppUpdater {
         // The download can take minutes; the app may have started something since.
         try Task.checkCancellation()
         if let reason = configuration.busyReason() {
-            throw UpdateInstaller.Failure(message: reason)
+            throw UpdateInstaller.Failure(message: reason, isDeferral: true)
         }
         try Task.checkCancellation()
         status("Installing…")
