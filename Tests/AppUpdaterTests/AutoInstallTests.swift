@@ -4,7 +4,7 @@ import XCTest
 @MainActor
 final class AutoInstallTests: XCTestCase {
     private func make(autoInstall: @escaping @Sendable () -> Bool = { true }, busy: String? = nil) -> AppUpdater {
-        let defaults = UserDefaults(suiteName: "AutoInstallTests.\(UUID().uuidString)")!
+        let defaults = testDefaults("AutoInstallTests")
         return AppUpdater(
             .init(repository: "erikrole/offload-releases", assetName: "Offload.dmg", bundleIdentifier: "com.erole.Offload",
                   currentVersion: "2.0.0", busyReason: { busy }, autoInstall: autoInstall),

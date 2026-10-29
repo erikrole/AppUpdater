@@ -65,7 +65,7 @@ final class ChannelCheckTests: XCTestCase {
         let updater = AppUpdater(
             .init(repository: "erikrole/offload-releases", assetName: "Offload.dmg", bundleIdentifier: "com.erole.Offload",
                   currentVersion: version, channel: channel),
-            defaults: UserDefaults(suiteName: "AppUpdaterChannelTests-\(UUID().uuidString)")!)
+            defaults: testDefaults("AppUpdaterChannelTests"))
         updater.fetch = { url in box.url = url; return (body, 200) }
         return (updater, box)
     }
@@ -76,7 +76,7 @@ final class ChannelCheckTests: XCTestCase {
     func testProductionIsTheDefaultAndUsesLatest() async {
         let box = URLBox()
         let updater = AppUpdater(.init(repository: "erikrole/offload-releases", assetName: "Offload.dmg", bundleIdentifier: "x", currentVersion: "2.3.0"),
-                                 defaults: UserDefaults(suiteName: "AppUpdaterChannelTests-\(UUID().uuidString)")!)
+                                 defaults: testDefaults("AppUpdaterChannelTests"))
         updater.fetch = { url in box.url = url; return (Data(feedRelease("v2.4.0").utf8), 200) }
         guard case let .available(found) = await updater.evaluate(userInitiated: true) else { return XCTFail() }
         XCTAssertEqual(found.version, "2.4.0")

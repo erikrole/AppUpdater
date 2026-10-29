@@ -40,7 +40,7 @@ final class ReleaseInfoTests: XCTestCase {
 @MainActor
 final class CheckFlowTests: XCTestCase {
     private func make(version: String, status: Int = 200, body: String = releaseJSON) -> AppUpdater {
-        let defaults = UserDefaults(suiteName: "AppUpdaterTests-\(UUID().uuidString)")!
+        let defaults = testDefaults("AppUpdaterTests")
         let updater = AppUpdater(
             .init(repository: "erikrole/offload-releases", assetName: "Offload.dmg", bundleIdentifier: "com.erole.Offload", currentVersion: version),
             defaults: defaults
@@ -195,7 +195,7 @@ final class NotesTests: XCTestCase {
     func testNotesNeverEmptyAndFallBackInOrder() throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: "AppUpdaterNotes-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
-        let defaults = UserDefaults(suiteName: "AppUpdaterTests-\(UUID().uuidString)")!
+        let defaults = testDefaults("AppUpdaterTests")
         var configuration = AppUpdater.Configuration(repository: "a/b", assetName: "A.dmg", bundleIdentifier: "com.x.NotesTests-\(UUID().uuidString)", currentVersion: "1.0")
         let updater = AppUpdater(configuration, defaults: defaults)
         try? FileManager.default.removeItem(at: updater.notesCache.directory)
@@ -231,7 +231,7 @@ final class WindowTests: XCTestCase {
         for style in [AppUpdater.Style(), AppUpdater.Style(accentColor: .systemRed, title: { _, _ in "Custom" }, primaryButtonTitle: "Go")] {
             let updater = AppUpdater(
                 .init(repository: "a/b", assetName: "A.dmg", bundleIdentifier: "com.x.A", currentVersion: "1.0", style: style),
-                defaults: UserDefaults(suiteName: "AppUpdaterTests-\(UUID().uuidString)")!
+                defaults: testDefaults("AppUpdaterTests")
             )
             for notes in ["", "## Head\n- **a** b\n### More\n- c", "no markdown at all"] {
                 let release = ReleaseInfo(version: "2.0", notes: notes, downloadURL: URL(string: "https://github.com/a/b")!)
@@ -272,7 +272,7 @@ final class HardeningTests: XCTestCase {
     func testBadRepositoryNameIsRejected() async {
         let updater = AppUpdater(
             .init(repository: "not a repo/../x", assetName: "A.dmg", bundleIdentifier: "com.x.A", currentVersion: "1.0"),
-            defaults: UserDefaults(suiteName: "AppUpdaterTests-\(UUID().uuidString)")!
+            defaults: testDefaults("AppUpdaterTests")
         )
         updater.fetch = { _ in XCTFail("must not fetch"); return (Data(), 200) }
         guard case .failed = await updater.evaluate(userInitiated: true) else { return XCTFail() }
@@ -435,7 +435,7 @@ final class LayoutTests: XCTestCase {
         _ = NSApplication.shared
         let updater = AppUpdater(
             .init(repository: "a/b", assetName: "A.dmg", bundleIdentifier: "com.x.A", displayName: "A", currentVersion: "1.0"),
-            defaults: UserDefaults(suiteName: "AppUpdaterTests-\(UUID().uuidString)")!
+            defaults: testDefaults("AppUpdaterTests")
         )
         let release = ReleaseInfo(version: "2.0", notes: notes, downloadURL: URL(string: "https://github.com/a/b")!, pageURL: URL(string: "https://github.com/a/b"))
         let controller = UpdateWindowController(mode: .available(release), updater: updater)
@@ -497,7 +497,7 @@ final class EventTests: XCTestCase {
         let updater = AppUpdater(
             .init(repository: "a/b", assetName: "A.dmg", bundleIdentifier: "com.x.A", appURL: FileManager.default.temporaryDirectory.appending(path: "Nope-\(UUID().uuidString).app"),
                   currentVersion: version, busyReason: { busy }, autoInstall: { false }, onEvent: { event in log.events.append(event) }),
-            defaults: defaults ?? UserDefaults(suiteName: "AppUpdaterTests-\(UUID().uuidString)")!
+            defaults: defaults ?? testDefaults("AppUpdaterTests")
         )
         updater.fetch = { _ in (Data(json.utf8), 200) }
         return updater
@@ -550,7 +550,7 @@ final class EventTests: XCTestCase {
     }
 
     func testInstalledIsReportedByTheNewVersionOnItsFirstLaunch() async {
-        let defaults = UserDefaults(suiteName: "AppUpdaterTests-\(UUID().uuidString)")!
+        let defaults = testDefaults("AppUpdaterTests")
         let oldLog = Log()
         make(version: "1.0", defaults: defaults, log: oldLog).rememberInstall(of: release)
 
@@ -576,7 +576,7 @@ final class EventTests: XCTestCase {
     func testNoHookIsFine() async {
         _ = NSApplication.shared
         let updater = AppUpdater(.init(repository: "a/b", assetName: "A.dmg", bundleIdentifier: "com.x.A", currentVersion: "1.0"),
-                                 defaults: UserDefaults(suiteName: "AppUpdaterTests-\(UUID().uuidString)")!)
+                                 defaults: testDefaults("AppUpdaterTests"))
         updater.skip(release)
         await settle()
     }
@@ -658,7 +658,7 @@ final class RequestQuitTests: XCTestCase {
 final class PostUpdateTests: XCTestCase {
     @MainActor
     private func run(_ postUpdate: AppUpdater.PostUpdate) -> (shown: Bool, window: Bool, events: [AppUpdater.Event.Kind]) {
-        let defaults = UserDefaults(suiteName: "AppUpdaterPostUpdate-\(UUID().uuidString)")!
+        let defaults = testDefaults("AppUpdaterPostUpdate")
         defaults.set(["version": "2.0", "notes": "- New", "from": "1.0"], forKey: AppUpdater.Keys.justUpdated)
         var events: [AppUpdater.Event.Kind] = []
         let configuration = AppUpdater.Configuration(repository: "a/b", assetName: "A.dmg", bundleIdentifier: "com.x.A", currentVersion: "2.0",

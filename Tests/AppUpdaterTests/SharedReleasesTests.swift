@@ -45,7 +45,7 @@ final class SharedReleasesParseTests: XCTestCase {
 @MainActor
 final class SharedReleasesCheckTests: XCTestCase {
     func testCheckReadsTheListAndOffersThePrefixedRelease() async {
-        let defaults = UserDefaults(suiteName: "AppUpdaterTests-\(UUID().uuidString)")!
+        let defaults = testDefaults("AppUpdaterTests")
         let updater = AppUpdater(.init(repository: "erikrole/releases", assetName: "Scratchpad.zip",
                                        bundleIdentifier: "com.erole.Scratchpad", currentVersion: "1.5.0",
                                        tagPrefix: "scratchpad-"), defaults: defaults)
