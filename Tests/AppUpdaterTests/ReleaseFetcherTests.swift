@@ -84,7 +84,7 @@ private actor Server {
         let release = try XCTUnwrap(ReleaseInfo.parse(data, assetName: "Fetch.dmg"))
         XCTAssertEqual(release.downloadURL.lastPathComponent, "Fetch.dmg")
         let id = "AppUpdaterFallbackTests-" + UUID().uuidString
-        let updater = AppUpdater(.init(repository: "erikrole/fetch-releases", assetName: "Fetch.dmg", bundleIdentifier: id), defaults: UserDefaults(suiteName: id)!)
+        let updater = AppUpdater(.init(repository: "erikrole/fetch-releases", assetName: "Fetch.dmg", bundleIdentifier: id), defaults: testDefaults("ReleaseFetcherTests"))
         defer { try? FileManager.default.removeItem(at: updater.notesCache.directory) }
         updater.notesCache.save("Real release notes", version: release.version)
         XCTAssertEqual(updater.resolvedNotes(for: release), "Real release notes")
