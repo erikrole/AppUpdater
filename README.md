@@ -71,6 +71,14 @@ Preview the window: `swift run UpdaterPreview`.
 - Refuses to update a copy running from a disk image or a translocated path; asks to move it to Applications.
   A destination that is itself a symbolic link is also refused; open the original app to update it.
 
+## Shared releases repository
+
+New apps publish to the one public `erikrole/releases` repository instead of a `<name>-releases` repo each. Tag every release
+`<app>-vX.Y.Z` (for example `scratchpad-v1.5.1`) and set `tagPrefix: "scratchpad-"` with `repository: "erikrole/releases"`. Checks then list
+the newest 100 releases and pick this app's highest version that has the asset; production still ignores prereleases and betas. Publish with
+`gh release create scratchpad-v1.5.1 Scratchpad.zip --repo erikrole/releases --latest=false` so no single app claims "Latest". An app moves
+over on its next release; installed copies follow once that release (still published to the old repo) reaches them.
+
 ## Channels (production and beta)
 
 `Configuration.channel` is a closure read at every check (default `{ .production }`, so existing apps are unchanged).

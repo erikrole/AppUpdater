@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-28
+
+- Add shared release repositories: `Configuration.tagPrefix`. With `repository: "erikrole/releases", tagPrefix: "scratchpad-"`, a check lists the
+  newest 100 releases and offers the highest `scratchpad-vX.Y.Z` with the asset. Other apps' tags are ignored. The rate-limit web fallback is
+  not used for prefixed checks. Unprefixed hosts are unchanged.
+
 ## 2026-10-26
 
 - Add update channels: `Configuration.channel` (`.production` by default, `.beta`). Beta lists releases, accepts prereleases and picks the

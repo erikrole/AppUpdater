@@ -70,26 +70,33 @@ public struct ReleaseInfo: Sendable, Equatable {
     /// Reads GitHub's release JSON. Prefers a versioned native-architecture asset, then a versioned or stable asset.
     /// Drafts are always ignored. Prereleases and `-beta.N` versions are ignored unless `allowPrerelease` is set (the beta
     /// channel). Only downloads from github.com over https are accepted.
-    public static func parse(_ data: Data, assetName: String, allowPrerelease: Bool = false) -> ReleaseInfo? {
+    /// With `tagPrefix` (a shared releases repository), only tags such as `scratchpad-v1.5.0` count, and the prefix is
+    /// removed before the version is read.
+    public static func parse(_ data: Data, assetName: String, allowPrerelease: Bool = false, tagPrefix: String? = nil) -> ReleaseInfo? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        return parse(root, assetName: assetName, allowPrerelease: allowPrerelease)
+        return parse(root, assetName: assetName, allowPrerelease: allowPrerelease, tagPrefix: tagPrefix)
     }
 
     /// The newest release in GitHub's `releases` list (an array) that has the asset. Drafts are skipped; prereleases count
     /// only with `allowPrerelease`. Order in the list does not matter: the highest version wins.
-    public static func newest(inList data: Data, assetName: String, allowPrerelease: Bool) -> ReleaseInfo? {
+    public static func newest(inList data: Data, assetName: String, allowPrerelease: Bool, tagPrefix: String? = nil) -> ReleaseInfo? {
         guard let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return nil }
         var best: ReleaseInfo?
         for item in list {
-            guard let release = parse(item, assetName: assetName, allowPrerelease: allowPrerelease) else { continue }
+            guard let release = parse(item, assetName: assetName, allowPrerelease: allowPrerelease, tagPrefix: tagPrefix) else { continue }
             if best == nil || isNewer(release.version, than: best!.version) { best = release }
         }
         return best
     }
 
-    static func parse(_ root: [String: Any], assetName: String, allowPrerelease: Bool) -> ReleaseInfo? {
+    static func parse(_ root: [String: Any], assetName: String, allowPrerelease: Bool, tagPrefix: String? = nil) -> ReleaseInfo? {
         guard (root["draft"] as? Bool) != true,
-              let tag = root["tag_name"] as? String else { return nil }
+              let fullTag = root["tag_name"] as? String else { return nil }
+        let tag: String
+        if let tagPrefix, !tagPrefix.isEmpty {
+            guard fullTag.hasPrefix(tagPrefix) else { return nil }
+            tag = String(fullTag.dropFirst(tagPrefix.count))
+        } else { tag = fullTag }
         guard version(tag) != nil else { return nil }
         let flaggedPrerelease = (root["prerelease"] as? Bool) == true
         let prerelease = flaggedPrerelease || isBeta(tag)

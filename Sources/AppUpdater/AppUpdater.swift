@@ -76,6 +76,10 @@ public final class AppUpdater {
         /// Return true only when exiting now loses nothing: flush anything unsaved first. AppUpdater then exits the process so the
         /// relaunch helper can open the new version. nil never forces an exit.
         public var safeToExit: (@MainActor @Sendable () async -> Bool)?
+        /// Set when `repository` holds releases for several apps (for example `erikrole/releases`): only tags that start with
+        /// this prefix, such as `scratchpad-v1.5.0`, belong to this app. Checks then read the newest 100 releases instead of
+        /// `releases/latest`, and the rate-limit web fallback is not used.
+        public var tagPrefix: String?
         /// Read at every check, so a Settings switch takes effect on the next check. Defaults to production.
         public var channel: @Sendable () -> UpdateChannel
         /// Read at every launch check. When true (the default), a stable update found by a launch check installs itself,
@@ -101,9 +105,11 @@ public final class AppUpdater {
             safeToExit: (@MainActor @Sendable () async -> Bool)? = nil,
             channel: @escaping @Sendable () -> UpdateChannel = { .production },
             autoInstall: @escaping @Sendable () -> Bool = { true },
+            tagPrefix: String? = nil,
             onEvent: (@MainActor @Sendable (Event) -> Void)? = nil
         ) {
             self.postUpdate = postUpdate
+            self.tagPrefix = tagPrefix
             self.channel = channel
             self.autoInstall = autoInstall
             self.safeToExit = safeToExit
@@ -212,15 +218,18 @@ public final class AppUpdater {
             return .tooSoon
         }
         let beta = configuration.channel() == .beta
+        let prefix = configuration.tagPrefix.flatMap { $0.isEmpty ? nil : $0 }
+        let query = prefix != nil ? "?per_page=100" : (beta ? "?per_page=20" : "/latest")
         guard configuration.repository.range(of: #"^[\w.-]+/[\w.-]+$"#, options: .regularExpression) != nil,
-              let url = URL(string: "https://api.github.com/repos/\(configuration.repository)/releases" + (beta ? "?per_page=20" : "/latest")) else {
+              let url = URL(string: "https://api.github.com/repos/\(configuration.repository)/releases" + query) else {
             return .failed("Bad repository name.")
         }
         do {
             let (data, status) = try await fetch(url)
             let found = status == 200
-                ? (beta ? ReleaseInfo.newest(inList: data, assetName: configuration.assetName, allowPrerelease: true)
-                        : ReleaseInfo.parse(data, assetName: configuration.assetName))
+                ? (prefix != nil || beta
+                    ? ReleaseInfo.newest(inList: data, assetName: configuration.assetName, allowPrerelease: beta, tagPrefix: prefix)
+                    : ReleaseInfo.parse(data, assetName: configuration.assetName))
                 : nil
             guard let release = found else {
                 return .failed(status == 200 ? "Couldn't read the release." : "GitHub returned status \(status).")
@@ -444,7 +453,7 @@ public final class AppUpdater {
         if offerReleases { alert.addButton(withTitle: "OK"); alert.addButton(withTitle: "View Releases") }
         if alert.runModal() == .alertSecondButtonReturn, offerReleases,
            configuration.repository.range(of: #"^[\w.-]+/[\w.-]+$"#, options: .regularExpression) != nil,
-           let page = URL(string: "https://github.com/\(configuration.repository)/releases/latest") {
+           let page = URL(string: "https://github.com/\(configuration.repository)/releases" + (configuration.tagPrefix == nil ? "/latest" : "")) {
             NSWorkspace.shared.open(page)
         }
     }
