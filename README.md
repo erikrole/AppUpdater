@@ -172,3 +172,7 @@ AgentBar and PowerBar were subsequently [retired](docs/retirement-2026-10-23.md)
 Stable checks use GitHub's API normally. If it returns 403 or 429, the updater resolves the same public repository's latest stable release page and probes a tag-anchored asset with HEAD. Requests stay HTTPS and verified apps still pass the same team, bundle-ID, version, signature and Gatekeeper checks. Failed discovery stays a failure, with the actual reason and a View Releases button. It never guesses that the app is current. Public probes use no account credentials or cookies; cached real notes remain available when the API cannot supply notes.
 
 For a local signed-app fixture, set `APPUPDATER_SIGNED_APP=/Applications/Fetch.app`. Enable `APPUPDATER_FALLBACK_LIVE=1` for the opt-in public-web fallback check.
+
+## Automatic prompts while open
+
+Hosts can schedule `await updater.checkInBackground(shouldPresent: { appIsActiveAndHasNoSheet })` on launch, activation and a bounded timer. This opt-in API always offers a prompt, stays quiet when current/offline, defers while busy, and rechecks eligibility after fetching. It never raises an existing update window. Later suppresses that version until the next launch; a newer version can still appear. Skip remains persistent and manual checks remain available. Startup cleanup and quiet post-update events run once. Hosts own scheduling and should disable silent launch installation with `autoInstall: { false }` when using prompts throughout.

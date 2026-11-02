@@ -160,6 +160,8 @@ public final class AppUpdater {
     let notesCache: NotesCache
     private(set) var window: UpdateWindowController?
     private var checking = false
+    private var preparedBackgroundChecks = false
+    private var offeredVersions: Set<String> = []
 
     public init(_ configuration: Configuration, defaults: UserDefaults = .standard) {
         self.configuration = configuration
@@ -179,6 +181,44 @@ public final class AppUpdater {
         UpdateInstaller.sweepLeftovers(for: configuration.appURL)
         if showJustUpdated() { return }
         Task { await check(userInitiated: false, trigger: .launch) }
+    }
+
+    /// An opt-in check for a host's timer or activation handler. Shows a newer version once per app run;
+    /// never installs silently, raises an existing window, or alerts when current/offline. Later waits until
+    /// the next launch; Skip remains persistent. Manual checks remain unrestricted. The host owns scheduling.
+    /// `shouldPresent` is checked before and after network I/O, so activity/sheets can defer the prompt.
+    @discardableResult
+    public func checkInBackground(shouldPresent: @MainActor () -> Bool = { true }) async -> CheckOutcome? {
+        await checkInBackground(shouldPresent: shouldPresent, offer: { release in
+            self.present(.available(release), trigger: .launch)
+        })
+    }
+
+    // Separate presentation from the asynchronous decision so tests never activate the user's apps.
+    func checkInBackground(shouldPresent: @MainActor () -> Bool = { true },
+                           offer: @MainActor (ReleaseInfo) -> Void) async -> CheckOutcome? {
+        guard !Task.isCancelled, !checking, window == nil, !isInstalling,
+              configuration.busyReason() == nil, shouldPresent() else { return nil }
+        if !preparedBackgroundChecks {
+            preparedBackgroundChecks = true
+            UpdateInstaller.sweepLeftovers(for: configuration.appURL)
+            if showJustUpdated() { return nil }
+        }
+        checking = true
+        defer { checking = false }
+        let channel = configuration.channel()
+        let outcome = await evaluate(userInitiated: false)
+        guard !Task.isCancelled, window == nil, !isInstalling, configuration.channel() == channel,
+              configuration.busyReason() == nil, shouldPresent() else { return nil }
+        if case let .available(release) = outcome, !offeredVersions.contains(release.version) {
+            rememberOffer(release)
+            offer(release)
+        }
+        return outcome
+    }
+
+    func rememberOffer(_ release: ReleaseInfo) {
+        offeredVersions.insert(release.version)
     }
 
     /// For a "Check for Updates…" menu item: always checks, and says so when the app is current or offline.
@@ -431,6 +471,7 @@ public final class AppUpdater {
     // MARK: - UI
 
     private func present(_ mode: UpdateWindowController.Mode, trigger: Event.Trigger? = nil) {
+        if case let .available(release) = mode { rememberOffer(release) }
         let controller = UpdateWindowController(mode: mode, updater: self)
         decision = .none
         controller.onClose = { [weak self] in
