@@ -1,5 +1,7 @@
 # AppUpdater
 
+Fetch compatibility backport (2026-11-04): based on `ea3e34e`; only the package deployment floor changes to macOS 26. Preserve the existing Fetch updater API, API-rate-limit fallback and installer trust checks. Local warnings-as-errors build, 50-test suite (two optional skips) and release-note checks pass; actual macOS 26 runtime remains a host acceptance check.
+
 Swift 6 package, macOS 27, AppKit only, no third-party dependencies. `swift build` / `swift test`
 (`APPUPDATER_LIVE=1` adds a live Offload download check). `swift run UpdaterPreview` shows the window.
 

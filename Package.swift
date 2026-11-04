@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "AppUpdater",
-    platforms: [.macOS("27.0")],
+    platforms: [.macOS("26.0")],
     products: [.library(name: "AppUpdater", targets: ["AppUpdater"])],
     targets: [
         .target(name: "AppUpdater"),
