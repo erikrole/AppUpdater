@@ -149,14 +149,17 @@ final class PillController: NSObject, NSPopoverDelegate {
 
     // MARK: - Anchoring
 
-    /// The view the pill hangs from: the host's `hostView`, else the main (or key, or first visible) window's content.
+    /// The view the pill hangs from: the host's `hostView`, else the main (or key, or first visible) window's content, else the
+    /// app's own status item (so menu bar apps need no hostView).
     private func anchor() -> NSView? {
         if let view = anchorView(), view.window != nil { return view }
         let windows = NSApp.windows.filter { $0 !== panel && $0.isVisible && !$0.isMiniaturized && !($0 is NSPanel) && $0.contentView != nil }
         let chosen = NSApp.mainWindow.flatMap { main in windows.first { $0 === main } }
             ?? NSApp.keyWindow.flatMap { key in windows.first { $0 === key } }
             ?? windows.first
-        return chosen?.contentView
+        if let chosen { return chosen.contentView }
+        // A menu bar app with no window open (SwiftUI's MenuBarExtra exposes no status item): hang under its own status item.
+        return NSApp.windows.first { $0 !== panel && $0.isVisible && $0.className.contains("StatusBar") }?.contentView
     }
 
     func reposition() {
