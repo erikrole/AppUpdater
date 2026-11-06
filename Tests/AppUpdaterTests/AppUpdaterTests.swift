@@ -224,27 +224,6 @@ final class NotesTests: XCTestCase {
     }
 }
 
-@MainActor
-final class WindowTests: XCTestCase {
-    func testWindowBuildsWithAndWithoutStyleAndEmptyNotes() {
-        _ = NSApplication.shared
-        for style in [AppUpdater.Style(), AppUpdater.Style(accentColor: .systemRed, title: { _, _ in "Custom" }, primaryButtonTitle: "Go")] {
-            let updater = AppUpdater(
-                .init(repository: "a/b", assetName: "A.dmg", bundleIdentifier: "com.x.A", currentVersion: "1.0", style: style),
-                defaults: testDefaults("AppUpdaterTests")
-            )
-            for notes in ["", "## Head\n- **a** b\n### More\n- c", "no markdown at all"] {
-                let release = ReleaseInfo(version: "2.0", notes: notes, downloadURL: URL(string: "https://github.com/a/b")!)
-                for mode in [UpdateWindowController.Mode.available(release), .updated(release)] {
-                    let controller = UpdateWindowController(mode: mode, updater: updater)
-                    XCTAssertGreaterThan(controller.window?.contentView?.fittingSize.height ?? 0, 100)
-                    controller.window?.close()
-                }
-            }
-        }
-    }
-}
-
 final class HardeningTests: XCTestCase {
     func testSweepRemovesLeftoversOnly() throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "AppUpdaterSweep-\(UUID().uuidString)")
@@ -426,61 +405,6 @@ final class RealSignedVerifyTests: XCTestCase {
 }
 
 @MainActor
-final class LayoutTests: XCTestCase {
-    private let long = "A very long bullet that must wrap onto several lines instead of running off the right edge of the card, including `inline code` and **bold text** to make sure styled runs wrap too."
-
-    private func allViews(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(allViews) }
-
-    private func makeWindow(notes: String) -> NSWindow {
-        _ = NSApplication.shared
-        let updater = AppUpdater(
-            .init(repository: "a/b", assetName: "A.dmg", bundleIdentifier: "com.x.A", displayName: "A", currentVersion: "1.0"),
-            defaults: testDefaults("AppUpdaterTests")
-        )
-        let release = ReleaseInfo(version: "2.0", notes: notes, downloadURL: URL(string: "https://github.com/a/b")!, pageURL: URL(string: "https://github.com/a/b"))
-        let controller = UpdateWindowController(mode: .available(release), updater: updater)
-        addTeardownBlock { controller.window?.close() }
-        controller.window?.contentView?.layoutSubtreeIfNeeded()
-        return controller.window!
-    }
-
-    func testLongNotesWrapInsideTheCardAndSkipStaysOneLine() throws {
-        let window = makeWindow(notes: "## Head\n- \(long)\n  - Nested: \(long)\n1. Numbered: \(long)\nPlain: \(long)\n```\nswift build --configuration release --arguments-that-are-long-enough-to-wrap-around\n```")
-        let content = try XCTUnwrap(window.contentView)
-        content.layoutSubtreeIfNeeded()
-        let views = allViews(content)
-        let card = try XCTUnwrap(views.first { String(describing: type(of: $0)).contains("CardView") })
-        let cardFrame = card.convert(card.bounds, to: nil)
-
-        let labels = views.compactMap { $0 as? NSTextField }.filter { $0.isDescendant(of: card) && !$0.stringValue.isEmpty }
-        XCTAssertGreaterThan(labels.count, 5)
-        for label in labels {
-            let frame = label.convert(label.bounds, to: nil)
-            XCTAssertLessThanOrEqual(frame.maxX, cardFrame.maxX + 0.5, "'\(label.stringValue.prefix(30))' runs past the card")
-            XCTAssertGreaterThanOrEqual(frame.minX, cardFrame.minX - 0.5)
-            // A wrapped label is as tall as the lines its text needs at its own width.
-            if label.stringValue.count > 80 {
-                let needed = label.attributedStringValue.boundingRect(
-                    with: NSSize(width: frame.width, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin, .usesFontLeading]
-                ).height
-                XCTAssertGreaterThanOrEqual(label.frame.height + 2, needed, "'\(label.stringValue.prefix(30))' is clipped")
-            }
-        }
-
-        let link = try XCTUnwrap(views.compactMap { $0 as? NSButton }.first { $0.title == "View on GitHub" })
-        XCTAssertFalse(link.isHidden)
-        XCTAssertGreaterThan(link.frame.width, 60)
-        XCTAssertGreaterThan(link.frame.height, 10)
-        let skip = try XCTUnwrap(views.compactMap { $0 as? NSButton }.first { $0.title == "Skip This Version" })
-        XCTAssertLessThan(skip.frame.height, 30, "Skip This Version wrapped")
-        XCTAssertGreaterThanOrEqual(skip.frame.width, skip.intrinsicContentSize.width - 0.5)
-        for button in views.compactMap({ $0 as? NSButton }) where button.isDescendant(of: content) {
-            XCTAssertLessThanOrEqual(button.convert(button.bounds, to: nil).maxX, content.bounds.maxX, "\(button.title) is cut off")
-        }
-    }
-}
-
-@MainActor
 final class EventTests: XCTestCase {
     private final class Log: @unchecked Sendable {
         @MainActor var events: [AppUpdater.Event] = []
@@ -505,19 +429,16 @@ final class EventTests: XCTestCase {
 
     private func settle() async { for _ in 0..<5 { await Task.yield() } }
 
-    func testShownFromLaunchAndManualThenDeferredOnClose() async {
-        for (userInitiated, trigger) in [(false, AppUpdater.Event.Trigger.launch), (true, .manual)] {
-            let log = Log()
-            let updater = make(log: log)
-            await updater.check(userInitiated: userInitiated, trigger: trigger)
-            await settle()
-            XCTAssertEqual(log.events, [.init(kind: .shown, fromVersion: "1.0", toVersion: "2.0", trigger: trigger, error: nil)])
-            updater.window?.window?.close()
-            await settle()
-            XCTAssertEqual(log.events.map(\.kind), [.shown, .deferred])
-            XCTAssertEqual(log.events.last?.fromVersion, "1.0")
-            XCTAssertEqual(log.events.last?.toVersion, "2.0")
-        }
+    /// With automatic installs off, a launch check only offers the update as a pill; nothing downloads and nothing opens.
+    func testLaunchCheckOffersTheUpdateAsAPillWithoutDownloading() async {
+        let log = Log()
+        let updater = make(log: log)
+        await updater.check(userInitiated: false, trigger: .launch)
+        await settle()
+        XCTAssertEqual(log.events, [.init(kind: .shown, fromVersion: "1.0", toVersion: "2.0", trigger: .launch, error: nil)])
+        XCTAssertEqual(updater.state, .available(version: "2.0"))
+        XCTAssertEqual(updater.pillContent()?.text, "Update available")
+        XCTAssertFalse(updater.isInstalling)
     }
 
     func testEventsAreDeliveredAfterTheCallNotInline() async {
@@ -534,7 +455,6 @@ final class EventTests: XCTestCase {
         let updater = make(log: log)
         await updater.check(userInitiated: false, trigger: .launch)
         updater.skip(release)
-        updater.window?.window?.close()
         await settle()
         XCTAssertEqual(log.events.map(\.kind), [.shown, .skipped])
     }
@@ -560,9 +480,7 @@ final class EventTests: XCTestCase {
         updated.checkOnLaunch()
         await settle()
         XCTAssertEqual(newLog.events, [.init(kind: .installed, fromVersion: "1.0", toVersion: "2.0", trigger: nil, error: nil)])
-        updated.window?.window?.close()
-        await settle()
-        XCTAssertEqual(newLog.events.map(\.kind), [.installed], "closing the what's-new window is not a deferral")
+        XCTAssertEqual(updated.pillContent()?.text, "What's new")
 
         // Only once: the next launch reports nothing.
         let again = Log()
@@ -657,7 +575,7 @@ final class RequestQuitTests: XCTestCase {
 
 final class PostUpdateTests: XCTestCase {
     @MainActor
-    private func run(_ postUpdate: AppUpdater.PostUpdate) -> (shown: Bool, window: Bool, events: [AppUpdater.Event.Kind]) {
+    private func run(_ postUpdate: AppUpdater.PostUpdate) -> (shown: Bool, pill: String?, events: [AppUpdater.Event.Kind]) {
         let defaults = testDefaults("AppUpdaterPostUpdate")
         defaults.set(["version": "2.0", "notes": "- New", "from": "1.0"], forKey: AppUpdater.Keys.justUpdated)
         var events: [AppUpdater.Event.Kind] = []
@@ -665,21 +583,22 @@ final class PostUpdateTests: XCTestCase {
                                                      postUpdate: postUpdate, onEvent: { events.append($0.kind) })
         let updater = AppUpdater(configuration, defaults: defaults)
         let shown = updater.showJustUpdated()
-        let hadWindow = updater.window != nil
-        updater.window?.close()
+        let pill = updater.pillContent()?.text
+        updater.pill.set(nil)
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-        return (shown, hadWindow, events)
+        return (shown, pill, events)
     }
 
-    @MainActor func testTheDefaultStillOpensTheUpdatedWindow() {
+    @MainActor func testTheDefaultShowsTheWhatsNewPill() {
         let result = run(.window)
-        XCTAssertTrue(result.shown && result.window)
+        XCTAssertTrue(result.shown)
+        XCTAssertEqual(result.pill, "What's new")
     }
 
-    @MainActor func testQuietOpensNoWindowButStillReportsInstalled() {
+    @MainActor func testQuietShowsNothingButStillReportsInstalled() {
         let result = run(.quiet)
         XCTAssertFalse(result.shown)
-        XCTAssertFalse(result.window)
+        XCTAssertNil(result.pill)
         XCTAssertEqual(result.events, [.installed])
     }
 }
