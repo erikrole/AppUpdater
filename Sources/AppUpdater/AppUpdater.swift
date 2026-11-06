@@ -2,25 +2,27 @@ import AppKit
 import os
 import Foundation
 
-/// Checks a GitHub releases repository for a newer build of this app, shows a splash with the release notes,
-/// and installs the update and relaunches with one click.
+/// Checks a GitHub releases repository for a newer build of this app and installs it quietly. There is no splash and no
+/// modal: a small pill at the top-right of the host window (or under its menu bar item) shows "Updating", then
+/// "Restart to update", and on the first launch of the new version a "What's new" pill with a few release-note bullets.
 ///
 ///     let updater = AppUpdater(.init(repository: "erikrole/offload-releases", assetName: "Offload.dmg"))
+///     updater.hostView = window.contentView   // or statusItem.button for a menu bar app
 ///     updater.checkOnLaunch()          // applicationDidFinishLaunching
 ///     updater.checkNow()               // "Check for Updates…" menu item
 @MainActor
 public final class AppUpdater {
-    /// Lets the host app dress the window in its own colours. Every field is optional; the defaults follow the system.
+    /// Lets the host app dress the pill in its own colour. Every field is optional; the defaults follow the system.
     public struct Style: @unchecked Sendable {
-        /// Fill of the primary button and tint of the bullets. Default: the system accent colour.
+        /// Tint of the pill's dot. Default: the system accent colour.
         public var accentColor: NSColor?
-        /// Colour of the small "UPDATE AVAILABLE" label. Default: `accentColor`.
+        /// No longer used: the splash window is gone. Kept so existing hosts still compile.
         public var kickerColor: NSColor?
-        /// Shown at the top of the window. Default: the app's icon.
+        /// No longer used: the splash window is gone. Kept so existing hosts still compile.
         public var icon: NSImage?
-        /// Replaces the headline ("Offload 1.5.3 is ready.") when it returns a string.
+        /// No longer used: the splash window is gone. Kept so existing hosts still compile.
         public var title: (@MainActor @Sendable (_ release: ReleaseInfo, _ justUpdated: Bool) -> String?)?
-        /// Replaces the primary button title ("Update and Relaunch").
+        /// No longer used: the splash window is gone. Kept so existing hosts still compile.
         public var primaryButtonTitle: String?
 
         public init(
@@ -38,8 +40,23 @@ public final class AppUpdater {
         }
     }
 
-    /// What opens after an update has installed and the new version launches.
+    /// What shows after an update has installed and the new version launches: the "What's new" pill (`.window`, the
+    /// default name is kept for source compatibility), or nothing at all (`.quiet`; the host can show its own note when it sees
+    /// the `.installed` event).
     public enum PostUpdate: Sendable { case window, quiet }
+
+    /// Where the quiet update is. Hosts can mirror it in a menu (`menuTitle`, `performPrimaryAction()`).
+    public enum State: Equatable, Sendable {
+        case idle
+        /// Downloading and verifying `version`.
+        case updating(version: String)
+        /// `version` is downloaded and verified; restarting installs it.
+        case ready(version: String)
+        /// A newer release was found but not downloaded (beta, or `autoInstall` is off). Clicking starts the download.
+        case available(version: String)
+        /// The last attempt failed. Quiet at launch; a manual check or `retry()` shows it.
+        case failed(message: String)
+    }
 
     /// Which releases a check may offer. Production is every app's default: stable releases only (`releases/latest`).
     /// Beta also offers prereleases (`X.Y.Z-beta.N`) and picks the newest release of either kind. An update is only ever
@@ -61,13 +78,13 @@ public final class AppUpdater {
         public var minimumCheckInterval: TimeInterval
         /// The installed version; defaults to `CFBundleShortVersionString`. Override to test.
         public var currentVersion: String
-        /// Return a reason (shown in the window) to hold an update back, such as "A copy is in progress."
+        /// Return a reason to hold an update back, such as "A copy is in progress." The update waits and retries later.
         public var busyReason: @MainActor @Sendable () -> String?
         public var style: Style
         /// Called on the main actor, after the fact and never inline, for each step of the update flow. It cannot
         /// change the flow. Keep it quick (queue the event; don't do network work in it).
         public var onEvent: (@MainActor @Sendable (Event) -> Void)?
-        /// Shown when a release has no notes and none were cached from an earlier fetch.
+        /// Used for the "What's new" pill when a release has no notes and none were cached from an earlier fetch.
         public var fallbackNotes: String?
         /// What the new version does the first time it opens after an update: the "UPDATED" window (default), or nothing at all
         /// (`.quiet`; the host can show its own note when it sees the `.installed` event).
@@ -85,7 +102,7 @@ public final class AppUpdater {
         /// Read at every launch check. When true (the default), a stable update found by a launch check installs itself,
         /// quietly and at once, and the new version shows what's new when it opens. Beta releases, manual checks, a
         /// busy host (`busyReason`), a skipped version and a version that has failed `maxAutoInstallFailures` times
-        /// still open the splash instead. Hosts wire this to a Settings switch.
+        /// don't download by themselves: they wait as "Update available" (or retry at the next launch). Hosts wire this to a Settings switch.
         public var autoInstall: @Sendable () -> Bool
 
         public init(
@@ -131,7 +148,7 @@ public final class AppUpdater {
     /// Something that happened in the update flow, for telemetry. See `Configuration.onEvent`.
     public struct Event: Sendable, Equatable {
         public enum Kind: String, Sendable { case shown, accepted, skipped, deferred, installed, failed }
-        /// What opened the splash.
+        /// What put the "Update available" pill up.
         public enum Trigger: String, Sendable { case launch, manual }
 
         public var kind: Kind
@@ -158,8 +175,52 @@ public final class AppUpdater {
     /// Fetches the latest-release JSON. Replaced in tests.
     var fetch: @Sendable (URL) async throws -> (Data, Int)
     let notesCache: NotesCache
-    private(set) var window: UpdateWindowController?
     private var checking = false
+    let pill = PillController()
+
+    /// The view the pill hangs from, top-right: the window's content view, or a menu bar app's `statusItem.button`
+    /// (the pill then sits under the item). This one line is all a host adds. Unset, the pill uses the main window.
+    public weak var hostView: NSView? { didSet { pill.refresh() } }
+    /// Convenience for `hostView = window?.contentView`.
+    public var hostWindow: NSWindow? {
+        get { hostView?.window }
+        set { hostView = newValue?.contentView }
+    }
+
+    /// Where the update stands. Observe with `onStateChange`.
+    public internal(set) var state: State = .idle {
+        didSet {
+            guard state != oldValue else { return }
+            refreshPill()
+            onStateChange?(state)
+        }
+    }
+    /// Called on the main actor whenever `state` changes.
+    public var onStateChange: (@MainActor (State) -> Void)?
+
+    /// Text for a menu item that mirrors the pill: "Restart to update", "Update failed. Retry" or "Update available",
+    /// nil when there's nothing to do. `performPrimaryAction()` does what the pill's click does.
+    public var menuTitle: String? {
+        switch state {
+        case .ready: "Restart to update"
+        case .failed: "Update failed. Retry"
+        case .available: "Update available"
+        case .idle, .updating: nil
+        }
+    }
+
+    /// The release behind the current state, for retrying and for the "Installing vX" hover.
+    private var currentRelease: ReleaseInfo?
+    /// A failure is only drawn when a person asked for the check or the retry.
+    private var failureVisible = false
+    /// A short "Up to date" confirmation after a manual check.
+    private var flash: PillContent?
+    private var flashTask: Task<Void, Never>?
+    private var stageTask: Task<Void, Never>?
+    private var terminateObserver: NSObjectProtocol?
+    /// The What's new pill stays up while its popover is open, even after it was marked as seen.
+    private var holdingWhatsNew = false
+    var previewWhatsNew: WhatsNew?
 
     public init(_ configuration: Configuration, defaults: UserDefaults = .standard) {
         self.configuration = configuration
@@ -169,45 +230,161 @@ public final class AppUpdater {
             try await ReleaseFetcher.fetch(url, assetName: configuration.assetName,
                 userAgent: "\(configuration.bundleIdentifier)/\(configuration.currentVersion)")
         }
+        pill.anchorView = { [weak self] in self?.hostView }
+        pill.accent = { [weak self] in self?.configuration.style.accentColor ?? .controlAccentColor }
+        pill.onClick = { [weak self] in self?.performPrimaryAction() }
+        pill.notesProvider = { [weak self] in self?.notesPopoverContent() }
+        pill.onNotesOpened = { [weak self] in self?.whatsNewOpened() }
+        pill.onNotesClosed = { [weak self] in self?.whatsNewClosed() }
+        // A downloaded update that was never applied is just a leftover; the next launch sweeps it too.
+        terminateObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.discardHeld() }
+        }
     }
+
+    isolated deinit { if let terminateObserver { NotificationCenter.default.removeObserver(terminateObserver) } }
 
     // MARK: - Public entry points
 
-    /// Call once at launch. Shows what's new if the app was just updated; otherwise checks quietly, at most
-    /// once per `minimumCheckInterval`, and only opens a window when there's an update.
+    /// Call once at launch. Shows the "What's new" pill if the app was just updated, then checks quietly, at most once per
+    /// `minimumCheckInterval`. An update downloads in the background behind a small "Updating" pill.
     public func checkOnLaunch() {
         UpdateInstaller.sweepLeftovers(for: configuration.appURL)
-        if showJustUpdated() { return }
+        _ = showJustUpdated()
         Task { await check(userInitiated: false, trigger: .launch) }
     }
 
-    /// For a "Check for Updates…" menu item: always checks, and says so when the app is current or offline.
+    /// For a "Check for Updates…" menu item: always checks. A found update downloads at once (any channel); "Up to date"
+    /// flashes briefly; a failure shows "Update failed. Retry". Never a dialog.
     public func checkNow() {
         Task { await check(userInitiated: true, trigger: .manual) }
     }
 
-    /// Opens the update window for a made-up release, to see how it looks. Installing from it will fail.
-    public func showPreview(_ release: ReleaseInfo) { present(.available(release)) }
+    /// Shows the "What's new" pill for a made-up release, to see how it looks. Nothing is saved.
+    public func showPreview(_ release: ReleaseInfo) {
+        previewWhatsNew = WhatsNew(version: release.version, notes: release.notes, page: release.pageURL, shown: Date(), dismissed: false)
+        refreshPill()
+    }
+
+    /// Puts the pill in `state` without checking or installing anything, for previews. Clicking does nothing harmful: there is no download.
+    public func showPreview(state preview: State) {
+        previewWhatsNew = nil
+        failureVisible = true
+        self.state = preview
+        refreshPill()
+    }
+
+    /// Opens the "What's new" popover if a "What's new" pill is up (hover or click does the same).
+    public func openWhatsNew() { pill.showNotes() }
+
+    /// What the pill's click does, for a menu item that mirrors it: restart when ready, retry after a failure,
+    /// start the download when an update is available.
+    public func performPrimaryAction() {
+        switch state {
+        case .ready: restartToUpdate()
+        case .failed: retry()
+        case .available:
+            if let release = currentRelease { startStaging(release, visibleFailure: true) }
+        case .idle, .updating: break
+        }
+    }
+
+    /// Installs the downloaded update and relaunches. Does nothing unless the state is `.ready` (or a quit is still waiting,
+    /// in which case it asks again).
+    public func restartToUpdate() {
+        if pendingRelaunch?.helper != nil { Self.requestQuit(); return }
+        guard case let .ready(version) = state, let prepared = held, applyTask == nil else { return }
+        // The host got busy since the download finished: stay ready and try again on the next click.
+        if let reason = configuration.busyReason() { Self.log.info("restart held back: \(reason, privacy: .public)"); return }
+        held = nil
+        applyTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.applyTask = nil }
+            do {
+                try await self.apply(prepared, status: { _ in }, quitPending: { self.state = .ready(version: version) })
+            } catch is CancellationError {
+                self.state = .idle
+            } catch {
+                self.failureVisible = true
+                if Self.countsAgainstRelease(error) { self.recordFailure(of: version) }
+                self.state = .failed(message: error.localizedDescription)
+            }
+        }
+    }
+
+    /// Starts again after "Update failed. Retry".
+    public func retry() {
+        guard case .failed = state else { return }
+        defaults.removeObject(forKey: Keys.failed)
+        if let release = currentRelease {
+            startStaging(release, visibleFailure: true)
+        } else {
+            state = .idle
+            checkNow()
+        }
+    }
 
     // MARK: - Checking
 
     func check(userInitiated: Bool, trigger: Event.Trigger? = nil) async {
-        guard !checking, window == nil else { window?.bringToFront(); return }
+        guard !checking else { return }
+        switch state {
+        case .updating, .ready: return
+        case .idle, .available, .failed: break
+        }
         checking = true
         defer { checking = false }
         switch await evaluate(userInitiated: userInitiated) {
         case let .available(release):
-            if !userInitiated, shouldAutoInstall(release) {
-                await autoInstall(release)
-            } else {
-                present(.available(release), trigger: trigger ?? (userInitiated ? .manual : .launch))
+            currentRelease = release
+            if userInitiated || shouldAutoInstall(release) {
+                startStaging(release, visibleFailure: userInitiated)
+            } else if failureCount(for: release.version) >= Self.maxAutoInstallFailures {
+                failureVisible = false
+                state = .failed(message: "Couldn't install \(release.version).")
+            } else if configuration.busyReason() == nil {
+                // Beta, or automatic updates are switched off: wait for a click instead of downloading.
+                state = .available(version: release.version)
+                emit(.shown, release, trigger: trigger ?? .launch)
             }
         case .upToDate:
-            if userInitiated { alert("\(configuration.displayName) is up to date.", "You have version \(configuration.currentVersion), the latest release.") }
+            if userInitiated { flashPill("Up to date") }
         case .failed(let reason):
-            if userInitiated { alert("Couldn't check for updates.", reason, offerReleases: true) }
+            Self.log.error("update check failed: \(reason, privacy: .public)")
+            if userInitiated {
+                failureVisible = true
+                state = .failed(message: reason)
+            }
         case .skipped, .tooSoon:
             break
+        }
+    }
+
+    /// Downloads and verifies `release` in the background. The pill reads "Updating", then "Restart to update"; a failure
+    /// is remembered and stays quiet unless a person asked for it.
+    func startStaging(_ release: ReleaseInfo, visibleFailure: Bool) {
+        guard stageTask == nil else { return }
+        currentRelease = release
+        failureVisible = visibleFailure
+        state = .updating(version: release.version)
+        stageTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.stageTask = nil }
+            do {
+                self.held = try await self.stage(release, progress: { _ in })
+                self.state = .ready(version: release.version)
+            } catch is CancellationError {
+                self.state = .idle
+            } catch {
+                // Only a release that failed counts against it. A busy app, another updater or no network is just a later try.
+                if Self.countsAgainstRelease(error) { self.recordFailure(of: release.version) }
+                Self.log.error("update to \(release.version, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+                if !self.failureVisible, (error as? UpdateInstaller.Failure)?.isDeferral == true {
+                    self.state = .idle
+                } else {
+                    self.state = .failed(message: error.localizedDescription)
+                }
+            }
         }
     }
 
@@ -252,19 +429,6 @@ public final class AppUpdater {
             && !release.isPrerelease && !ReleaseInfo.isBeta(release.version)
             && failureCount(for: release.version) < Self.maxAutoInstallFailures
             && configuration.busyReason() == nil
-    }
-
-    /// Installs without a window. A failure is remembered and stays quiet: the next launch retries, and after
-    /// `maxAutoInstallFailures` the splash is offered instead.
-    private func autoInstall(_ release: ReleaseInfo) async {
-        do {
-            try await install(release, progress: { _ in }, status: { _ in })
-        } catch is CancellationError {
-        } catch {
-            // Only a release that failed counts against it. A busy app, another updater or no network is just a later try.
-            if Self.countsAgainstRelease(error) { recordFailure(of: release.version) }
-            Self.log.error("automatic update to \(release.version, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
-        }
     }
 
     /// Whether an install error says something about the release (bad signature, wrong app, a swap that failed) and not the moment.
@@ -318,28 +482,100 @@ public final class AppUpdater {
 
     // MARK: - What's new after an update
 
-    func showJustUpdated() -> Bool {
-        guard let saved = defaults.dictionary(forKey: Keys.justUpdated),
-              let version = saved["version"] as? String else { return false }
-        defaults.removeObject(forKey: Keys.justUpdated)
-        guard version == configuration.currentVersion else {
-            // The relaunch helper put the old version back: that release didn't open, so count it against auto-install.
-            recordFailure(of: version)
-            return false
+    func showJustUpdated(now: Date = Date()) -> Bool {
+        let current = configuration.currentVersion
+        var record = storedWhatsNew()
+        if let saved = defaults.dictionary(forKey: Keys.justUpdated), let version = saved["version"] as? String {
+            defaults.removeObject(forKey: Keys.justUpdated)
+            guard version == current else {
+                // The relaunch helper put the old version back: that release didn't open, so count it against auto-install.
+                recordFailure(of: version)
+                return false
+            }
+            defaults.removeObject(forKey: Keys.failed)
+            let release = ReleaseInfo(
+                version: version,
+                notes: saved["notes"] as? String ?? "",
+                downloadURL: URL(string: "https://github.com")!,
+                pageURL: (saved["page"] as? String).flatMap(URL.init(string:)),
+                date: saved["date"] as? Date
+            )
+            emit(.installed, release, from: saved["from"] as? String ?? "")
+            record = WhatsNew(version: version, notes: release.notes, page: release.pageURL, shown: now, dismissed: false)
+        } else if let last = defaults.string(forKey: Keys.lastSeen), ReleaseInfo.isNewer(current, than: last), record?.version != current,
+                  let cached = notesCache.load(version: current) {
+            // Updated some other way (copied over by hand, say): the notes cached at the last check still tell what changed.
+            record = WhatsNew(version: current, notes: cached, page: nil, shown: now, dismissed: false)
         }
-        defaults.removeObject(forKey: Keys.failed)
-        let release = ReleaseInfo(
-            version: version,
-            notes: saved["notes"] as? String ?? "",
-            downloadURL: URL(string: "https://github.com")!,
-            pageURL: (saved["page"] as? String).flatMap(URL.init(string:)),
-            date: saved["date"] as? Date
-        )
-        emit(.installed, release, from: saved["from"] as? String ?? "")
-        // Quiet: no window, and the launch check carries on as usual.
+        defaults.set(current, forKey: Keys.lastSeen)
+        // Quiet: no pill, and the launch check carries on as usual.
         guard configuration.postUpdate == .window else { return false }
-        present(.updated(release))
-        return true
+        if let record { save(record) }
+        refreshPill()
+        return activeWhatsNew(now: now) != nil
+    }
+
+    // MARK: - What's new pill
+
+    /// How long the pill waits to be opened before it goes away on its own.
+    static let whatsNewLifetime: TimeInterval = 3 * 24 * 3600
+
+    struct WhatsNew: Equatable {
+        var version: String
+        var notes: String
+        var page: URL?
+        var shown: Date
+        var dismissed: Bool
+    }
+
+    func storedWhatsNew() -> WhatsNew? {
+        guard let saved = defaults.dictionary(forKey: Keys.whatsNew), let version = saved["version"] as? String,
+              let shown = saved["shown"] as? Date else { return nil }
+        return WhatsNew(version: version, notes: saved["notes"] as? String ?? "", page: (saved["page"] as? String).flatMap(URL.init(string:)),
+                        shown: shown, dismissed: saved["dismissed"] as? Bool ?? false)
+    }
+
+    private func save(_ record: WhatsNew) {
+        var saved: [String: Any] = ["version": record.version, "notes": record.notes, "shown": record.shown, "dismissed": record.dismissed]
+        if let page = record.page { saved["page"] = page.absoluteString }
+        defaults.set(saved, forKey: Keys.whatsNew)
+    }
+
+    /// The "What's new" notes to show now, or nil: already opened, older than three days, for another version, or no notes.
+    func activeWhatsNew(now: Date = Date()) -> WhatsNew? {
+        if var preview = previewWhatsNew { preview.notes = notesText(for: preview); return QuietNotes.hasBullets(preview.notes) ? preview : nil }
+        guard var record = storedWhatsNew() else { return nil }
+        guard record.version == configuration.currentVersion else { return nil }
+        guard holdingWhatsNew || (!record.dismissed && now.timeIntervalSince(record.shown) < Self.whatsNewLifetime) else { return nil }
+        record.notes = notesText(for: record)
+        return QuietNotes.hasBullets(record.notes) ? record : nil
+    }
+
+    /// The release's own notes, else those cached for that version, else the host's fallback. No made-up text: no notes, no pill.
+    private func notesText(for record: WhatsNew) -> String {
+        let own = record.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !own.isEmpty { return own }
+        if let cached = notesCache.load(version: record.version) { return cached }
+        return configuration.fallbackNotes?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private func notesPopoverContent() -> NotesPopoverContent? {
+        guard let record = activeWhatsNew() else { return nil }
+        let page = record.page ?? URL(string: "https://github.com/\(configuration.repository)/releases")
+        return NotesPopoverContent(version: record.version, bullets: QuietNotes.bullets(from: record.notes), pageURL: page)
+    }
+
+    private func whatsNewOpened() {
+        holdingWhatsNew = true
+        guard previewWhatsNew == nil, var record = storedWhatsNew() else { return }
+        record.dismissed = true
+        save(record)
+    }
+
+    private func whatsNewClosed() {
+        holdingWhatsNew = false
+        previewWhatsNew = nil
+        refreshPill()
     }
 
     /// The relaunch helper that is waiting for this app to quit, with the folders it will swap.
@@ -380,6 +616,7 @@ public final class AppUpdater {
         defaults.removeObject(forKey: Keys.justUpdated)
         decision = .none
         isInstalling = false
+        state = .idle
     }
 
     /// Asks the app to quit from a run-loop callout, not from inside the caller's main-actor task.
@@ -428,33 +665,38 @@ public final class AppUpdater {
         defaults.set(saved, forKey: Keys.justUpdated)
     }
 
-    // MARK: - UI
+    // MARK: - Pill
 
-    private func present(_ mode: UpdateWindowController.Mode, trigger: Event.Trigger? = nil) {
-        let controller = UpdateWindowController(mode: mode, updater: self)
-        decision = .none
-        controller.onClose = { [weak self] in
-            guard let self else { return }
-            // Closing the splash without skipping or installing is "Later", however it was closed.
-            if case let .available(release) = mode, self.decision == .none { self.emit(.deferred, release) }
-            self.decision = .none
-            self.window = nil
+    private func refreshPill() { pill.set(pillContent()) }
+
+    /// One pill at a time: an update in progress beats a failure someone asked about, which beats a flash, which beats "What's new".
+    func pillContent() -> PillContent? {
+        switch state {
+        case let .updating(version):
+            return PillContent(indicator: .spinner, text: "Updating", hoverText: "Installing v\(version)", clickable: false)
+        case .ready:
+            return PillContent(indicator: .dot, text: "Restart to update", hoverText: nil, clickable: true)
+        case .available:
+            return PillContent(indicator: .dot, text: "Update available", hoverText: nil, clickable: true)
+        case .failed where failureVisible:
+            return PillContent(indicator: .warning, text: "Update failed. Retry", hoverText: nil, clickable: true)
+        case .failed, .idle:
+            break
         }
-        window = controller
-        controller.show()
-        if case let .available(release) = mode, let trigger { emit(.shown, release, trigger: trigger) }
+        if let flash { return flash }
+        if activeWhatsNew() != nil { return PillContent(indicator: .dot, text: "What's new", hoverText: nil, clickable: false, opensNotes: true) }
+        return nil
     }
 
-    private func alert(_ message: String, _ detail: String, offerReleases: Bool = false) {
-        let alert = NSAlert()
-        alert.messageText = message
-        alert.informativeText = detail
-        alert.icon = NSApp.applicationIconImage
-        if offerReleases { alert.addButton(withTitle: "OK"); alert.addButton(withTitle: "View Releases") }
-        if alert.runModal() == .alertSecondButtonReturn, offerReleases,
-           configuration.repository.range(of: #"^[\w.-]+/[\w.-]+$"#, options: .regularExpression) != nil,
-           let page = URL(string: "https://github.com/\(configuration.repository)/releases" + (configuration.tagPrefix == nil ? "/latest" : "")) {
-            NSWorkspace.shared.open(page)
+    private func flashPill(_ text: String) {
+        flashTask?.cancel()
+        flash = PillContent(indicator: .check, text: text, hoverText: nil, clickable: false)
+        refreshPill()
+        flashTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2.5))
+            guard !Task.isCancelled, let self else { return }
+            self.flash = nil
+            self.refreshPill()
         }
     }
 
@@ -463,21 +705,65 @@ public final class AppUpdater {
         static let skipped = "AppUpdater.skippedVersion"
         static let justUpdated = "AppUpdater.justUpdated"
         static let failed = "AppUpdater.failedUpdate"
+        static let lastSeen = "AppUpdater.lastSeenVersion"
+        static let whatsNew = "AppUpdater.whatsNew"
     }
 
     // MARK: - Install
 
-    /// True from the moment an install starts until the app quits or the install fails. Hosts can consult this
-    /// in `applicationShouldTerminate`.
+    /// True from the moment a download or install starts until it is staged, the app quits, or it fails. Hosts can
+    /// consult this in `applicationShouldTerminate`. A finished download waiting for "Restart to update" is not installing.
     public private(set) var isInstalling = false
 
     /// True only after the verified swap and helper handoff. Hosts may allow the updater's quit at
     /// this point while continuing to block ordinary quit during preparation. Keep save/busy guards.
     public var isAwaitingRelaunch: Bool { pendingRelaunch?.helper != nil }
 
-    /// Downloads, verifies, swaps in the new app and asks this one to quit. A detached helper opens the new app
+    /// A downloaded, verified update that is waiting for the person to restart.
+    struct Prepared {
+        let staged: URL
+        let workDirectory: URL
+        let lease: UpdateInstaller.InstallationLock
+        let release: ReleaseInfo
+    }
+    private var held: Prepared?
+    private var applyTask: Task<Void, Never>?
+
+    func discardHeld() {
+        guard let held else { return }
+        self.held = nil
+        Self.cleanUp(held)
+    }
+
+    private static func cleanUp(_ prepared: Prepared) {
+        try? FileManager.default.removeItem(at: prepared.staged)
+        try? FileManager.default.removeItem(at: prepared.workDirectory)
+        withExtendedLifetime(prepared.lease) {}
+    }
+
+    /// Downloads, verifies and stages `release` without touching the installed app. Progress is 0…1.
+    /// Cancelling the task cancels the download.
+    func stage(_ release: ReleaseInfo, progress: @escaping @MainActor (Double) -> Void) async throws -> Prepared {
+        guard !isInstalling else { throw CancellationError() }
+        decision = .installing
+        emit(.accepted, release)
+        do {
+            let prepared = try await performStage(release, progress: progress)
+            isInstalling = false
+            return prepared
+        } catch is CancellationError {
+            decision = .none
+            throw CancellationError()
+        } catch {
+            decision = .none
+            emit(.failed, release, error: error.localizedDescription)
+            throw error
+        }
+    }
+
+    /// Stage, then swap in the new app and ask this one to quit, in one go. A detached helper opens the new app
     /// once this process has exited and removes the backup; if the new app won't open, it restores the old one.
-    /// Progress is 0…1 for the download; `status` names later steps. Cancelling the task cancels the download.
+    /// `status` names later steps. Cancelling the task cancels the download.
     func install(
         _ release: ReleaseInfo,
         progress: @escaping @MainActor (Double) -> Void,
@@ -488,7 +774,8 @@ public final class AppUpdater {
         decision = .installing
         emit(.accepted, release)
         do {
-            try await performInstall(release, progress: progress, status: status, quitPending: quitPending)
+            let prepared = try await performStage(release, progress: progress)
+            try await performApply(prepared, status: status, quitPending: quitPending)
         } catch is CancellationError {
             // Backing out of the download is a "Later".
             decision = .none
@@ -500,29 +787,59 @@ public final class AppUpdater {
         }
     }
 
-    private func performInstall(
-        _ release: ReleaseInfo,
-        progress: @escaping @MainActor (Double) -> Void,
+    /// Swaps a staged update in and asks the app to quit.
+    func apply(
+        _ prepared: Prepared,
+        status: @escaping @MainActor (String) -> Void,
+        quitPending: @escaping @MainActor () -> Void = {}
+    ) async throws {
+        decision = .installing
+        do {
+            try await performApply(prepared, status: status, quitPending: quitPending)
+        } catch {
+            decision = .none
+            if !(error is CancellationError) { emit(.failed, prepared.release, error: error.localizedDescription) }
+            throw error
+        }
+    }
+
+    private func performStage(_ release: ReleaseInfo, progress: @escaping @MainActor (Double) -> Void) async throws -> Prepared {
+        if let reason = configuration.busyReason() { throw UpdateInstaller.Failure(message: reason, isDeferral: true) }
+        isInstalling = true
+        var succeeded = false
+        defer { if !succeeded { isInstalling = false } }
+        let configuration = configuration
+        let prepared = try await UpdateInstaller.prepare(release: release, destination: configuration.appURL, configuration: configuration) { fraction in
+            Task { @MainActor in progress(fraction) }
+        }
+        let result = Prepared(staged: prepared.staged, workDirectory: prepared.workDirectory, lease: prepared.lease, release: release)
+        // The download can take minutes; the app may have started something since.
+        do {
+            try Task.checkCancellation()
+            if let reason = configuration.busyReason() { throw UpdateInstaller.Failure(message: reason, isDeferral: true) }
+        } catch {
+            Self.cleanUp(result)
+            throw error
+        }
+        succeeded = true
+        return result
+    }
+
+    private func performApply(
+        _ prepared: Prepared,
         status: @escaping @MainActor (String) -> Void,
         quitPending: @escaping @MainActor () -> Void
     ) async throws {
-        if let reason = configuration.busyReason() { throw UpdateInstaller.Failure(message: reason, isDeferral: true) }
-        isInstalling = true
-        var finishedHandOff = false
-        defer { if !finishedHandOff { isInstalling = false } }
-
+        let release = prepared.release
         let destination = configuration.appURL
         let configuration = configuration
-        let prepared = try await UpdateInstaller.prepare(release: release, destination: destination, configuration: configuration) { fraction in
-            Task { @MainActor in progress(fraction) }
-        }
+        isInstalling = true
+        var finishedHandOff = false
         defer {
-            try? FileManager.default.removeItem(at: prepared.staged)
-            try? FileManager.default.removeItem(at: prepared.workDirectory)
-            withExtendedLifetime(prepared.lease) {}
+            if !finishedHandOff { isInstalling = false }
+            Self.cleanUp(prepared)
         }
-
-        // The download can take minutes; the app may have started something since.
+        // The app may have started something since the download.
         try Task.checkCancellation()
         if let reason = configuration.busyReason() {
             throw UpdateInstaller.Failure(message: reason, isDeferral: true)

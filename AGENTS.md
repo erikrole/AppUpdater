@@ -1,13 +1,15 @@
 # AppUpdater
 
 Swift 6 package, macOS 26+, AppKit only, no third-party dependencies. `swift build` / `swift test`
-(`APPUPDATER_LIVE=1` adds live Offload DMG and six active public ZIP verification checks). `swift run UpdaterPreview` shows the window.
+(`APPUPDATER_LIVE=1` adds live Offload DMG and six active public ZIP verification checks). `swift run UpdaterPreview --state ready` shows the pill (see README for states).
 
 - AgentBar and PowerBar were retired on October 23, 2026. Exclude them from active host adoption and live release
   checks unless the user explicitly reactivates them. Current repository lifecycle state is in `docs/retirement-2026-10-23.md`.
 
 - `ReleaseInfo` parses GitHub's latest-release JSON; `AppUpdater` decides (rate limit, skip, version) and installs;
-  `UpdateInstaller` downloads, verifies, swaps and relaunches; `UpdateWindowController` is the splash.
+  `UpdateInstaller` downloads, verifies, swaps and relaunches; `PillController` (UpdatePill.swift) is the only UI: a quiet pill, no splash or modal.
+  `AppUpdater.stage` downloads and verifies and holds the result; `apply` (the "Restart to update" click) swaps and relaunches. Nothing on disk changes before the click.
+  Failures are silent at launch; manual checks and retries show "Update failed. Retry". Keep copy to: Updating, Restart to update, What's new, Update failed. Retry.
 - Install logic derives from UpdateBar's `DMGInstaller` (Team ID T26T3G8C7Q). Keep the verify-before-swap and
   backup/rollback order; never install an unverified app.
 - `prepare` returns a verified staged app, work directory, and installation lease. Retain the lease through cleanup,
@@ -23,5 +25,5 @@ Swift 6 package, macOS 26+, AppKit only, no third-party dependencies. `swift bui
 - Hosts must allow updater quit only after `isAwaitingRelaunch`, preserving their own busy/save/restore guards.
 - Apps integrate through their own repos; do not edit Fetch or Offload from here.
 
-- Stable release checks now fall back on HTTP 403/429 to HTTPS GitHub /releases/latest discovery and tag-anchored HEAD-verified assets. Keep discovery in the configured repository, probes as HEAD across redirects, and the existing install verification. Do not use this fallback for beta lists, TLS/network exceptions, or malformed successful API responses. No account/token/cookies are required; cached real notes take precedence over missing fallback notes. Manual failures show their reason and View Releases.
+- Stable release checks now fall back on HTTP 403/429 to HTTPS GitHub /releases/latest discovery and tag-anchored HEAD-verified assets. Keep discovery in the configured repository, probes as HEAD across redirects, and the existing install verification. Do not use this fallback for beta lists, TLS/network exceptions, or malformed successful API responses. No account/token/cookies are required; cached real notes take precedence over missing fallback notes. Manual failures show "Update failed. Retry" (reason in `state`).
 - Test real signed payloads with `APPUPDATER_SIGNED_APP=/Applications/Fetch.app swift test -Xswiftc -warnings-as-errors` when the default Offload fixture is a local, unnotarized build. This selects a fixture; it does not skip signature/Gatekeeper checks. `APPUPDATER_FALLBACK_LIVE=1 swift test --filter ReleaseFetcherTests/testLiveFallbackWithoutAPIQuota` exercises GitHub web discovery with a forced API limit. Fetch's compatibility branch is based on e1f5004 and does not import main's automatic-install, beta, lease or quit API changes.
