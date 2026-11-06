@@ -176,6 +176,8 @@ public final class AppUpdater {
     var fetch: @Sendable (URL) async throws -> (Data, Int)
     let notesCache: NotesCache
     private var checking = false
+    private var preparedBackgroundChecks = false
+    private var offeredVersions: Set<String> = []
     let pill = PillController()
 
     /// The view the pill hangs from, top-right: the window's content view, or a menu bar app's `statusItem.button`
@@ -252,6 +254,50 @@ public final class AppUpdater {
         UpdateInstaller.sweepLeftovers(for: configuration.appURL)
         _ = showJustUpdated()
         Task { await check(userInitiated: false, trigger: .launch) }
+    }
+
+    /// An opt-in check for a host's timer or activation handler. Offers a newer version once per app run: it downloads
+    /// quietly or waits as "Update available" (per `autoInstall`), and never alerts when current or offline. A skipped version
+    /// stays skipped; manual checks remain unrestricted. The host owns scheduling.
+    /// `shouldPresent` is checked before and after network I/O, so activity/sheets can defer the offer.
+    @discardableResult
+    public func checkInBackground(shouldPresent: @MainActor () -> Bool = { true }) async -> CheckOutcome? {
+        await checkInBackground(shouldPresent: shouldPresent, offer: { release in
+            self.handleAvailable(release, userInitiated: false, trigger: .launch)
+        })
+    }
+
+    // Separate presentation from the asynchronous decision so tests never start a download.
+    func checkInBackground(shouldPresent: @MainActor () -> Bool = { true },
+                           offer: @MainActor (ReleaseInfo) -> Void) async -> CheckOutcome? {
+        guard !Task.isCancelled, !checking, !isInstalling, !isBusyUpdating,
+              configuration.busyReason() == nil, shouldPresent() else { return nil }
+        if !preparedBackgroundChecks {
+            preparedBackgroundChecks = true
+            UpdateInstaller.sweepLeftovers(for: configuration.appURL)
+            _ = showJustUpdated()
+        }
+        checking = true
+        defer { checking = false }
+        let channel = configuration.channel()
+        let outcome = await evaluate(userInitiated: false)
+        guard !Task.isCancelled, !isInstalling, !isBusyUpdating, configuration.channel() == channel,
+              configuration.busyReason() == nil, shouldPresent() else { return nil }
+        if case let .available(release) = outcome, !offeredVersions.contains(release.version) {
+            rememberOffer(release)
+            offer(release)
+        }
+        return outcome
+    }
+
+    func rememberOffer(_ release: ReleaseInfo) {
+        offeredVersions.insert(release.version)
+    }
+
+    /// A download is running or finished and waiting for the restart click.
+    private var isBusyUpdating: Bool {
+        switch state { case .updating, .ready: true
+        case .idle, .available, .failed: false }
     }
 
     /// For a "Check for Updates…" menu item: always checks. A found update downloads at once (any channel); "Up to date"
@@ -336,17 +382,7 @@ public final class AppUpdater {
         defer { checking = false }
         switch await evaluate(userInitiated: userInitiated) {
         case let .available(release):
-            currentRelease = release
-            if userInitiated || shouldAutoInstall(release) {
-                startStaging(release, visibleFailure: userInitiated)
-            } else if failureCount(for: release.version) >= Self.maxAutoInstallFailures {
-                failureVisible = false
-                state = .failed(message: "Couldn't install \(release.version).")
-            } else if configuration.busyReason() == nil {
-                // Beta, or automatic updates are switched off: wait for a click instead of downloading.
-                state = .available(version: release.version)
-                emit(.shown, release, trigger: trigger ?? .launch)
-            }
+            handleAvailable(release, userInitiated: userInitiated, trigger: trigger)
         case .upToDate:
             if userInitiated { flashPill("Up to date") }
         case .failed(let reason):
@@ -357,6 +393,22 @@ public final class AppUpdater {
             }
         case .skipped, .tooSoon:
             break
+        }
+    }
+
+    /// What a found update turns into: a quiet download, or a pill that waits for a click.
+    func handleAvailable(_ release: ReleaseInfo, userInitiated: Bool, trigger: Event.Trigger?) {
+        currentRelease = release
+        rememberOffer(release)
+        if userInitiated || shouldAutoInstall(release) {
+            startStaging(release, visibleFailure: userInitiated)
+        } else if failureCount(for: release.version) >= Self.maxAutoInstallFailures {
+            failureVisible = false
+            state = .failed(message: "Couldn't install \(release.version).")
+        } else if configuration.busyReason() == nil {
+            // Beta, or automatic updates are switched off: wait for a click instead of downloading.
+            state = .available(version: release.version)
+            emit(.shown, release, trigger: trigger ?? .launch)
         }
     }
 

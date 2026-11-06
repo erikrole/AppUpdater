@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-02
+
+- Add opt-in background update prompts with post-fetch busy/eligibility checks, cancellation, one offer per new version per run, persistent Skip and unchanged manual checks. Existing launch/install behavior remains available.
+
 ## 2026-10-28
 
 - Add shared release repositories: `Configuration.tagPrefix`. With `repository: "erikrole/releases", tagPrefix: "scratchpad-"`, a check lists the

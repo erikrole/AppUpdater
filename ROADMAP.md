@@ -18,3 +18,7 @@ Further work to evaluate:
 - CI runs the offline suite on the macOS 27 `xcode-27` image. Live download verification remains opt-in.
 
 Stable release checks now tolerate exhausted shared-network GitHub API quotas via verified public web discovery. Fetch adopts a compatibility backport on its e1f5004 pin; other hosts receive this change when they update their pins.
+
+Opt-in `checkInBackground(shouldPresent:)` supports periodic host prompts without silent installation, duplicate focus changes or interruption of busy work. Hosts must adopt the new revision and own a bounded timer/activation policy.
+
+Background-prompt validation: warnings-as-errors build/test passed (107 tests, 3 optional tests skipped, no failures), including delayed busy/foreground/cancellation/channel changes, new releases while open, Later/Skip, concurrency and post-update state. Release-note scripts and diff checks passed. Offload adopts this API through its own patch release.
