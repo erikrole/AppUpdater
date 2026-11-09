@@ -1,15 +1,15 @@
 # AppUpdater
 
 Swift 6 package, macOS 26+, AppKit only, no third-party dependencies. `swift build` / `swift test`
-(`APPUPDATER_LIVE=1` adds live Offload DMG and six active public ZIP verification checks). `swift run UpdaterPreview --state ready` shows the pill (see README for states).
+(`APPUPDATER_LIVE=1` adds live Offload DMG and six active public ZIP verification checks). `swift run UpdaterPreview --state ready` shows the title bar button (see README for states).
 
 - AgentBar and PowerBar were retired on October 23, 2026. Exclude them from active host adoption and live release
   checks unless the user explicitly reactivates them. Current repository lifecycle state is in `docs/retirement-2026-10-23.md`.
 
 - `ReleaseInfo` parses GitHub's latest-release JSON; `AppUpdater` decides (rate limit, skip, version) and installs;
-  `UpdateInstaller` downloads, verifies, swaps and relaunches; `PillController` (UpdatePill.swift) is the only UI: a quiet pill, no splash or modal.
+  `UpdateInstaller` downloads, verifies, swaps and relaunches; `PillController` (UpdatePill.swift) is the only UI: a small button in the host window's title bar (an `NSTitlebarAccessoryViewController`, `.trailing`), no splash, modal or floating panel. Windowless apps use `menuItem`/`menuTitle` instead; never reintroduce a floating or status-item-anchored pill.
   `AppUpdater.stage` downloads and verifies and holds the result; `apply` (the "Restart to update" click) swaps and relaunches. Nothing on disk changes before the click.
-  Failures are silent at launch; manual checks and retries show "Update failed. Retry". Keep copy to: Updating, Restart to update, What's new, Update failed. Retry.
+  Failures are silent at launch; manual checks and retries show "Update failed. Retry". Keep copy to: Update, Updating, Restart, What's new, Update failed. Retry (the menu item reads Update available / Updating… / Restart to update).
 - Install logic derives from UpdateBar's `DMGInstaller` (Team ID T26T3G8C7Q). Keep the verify-before-swap and
   backup/rollback order; never install an unverified app.
 - `prepare` returns a verified staged app, work directory, and installation lease. Retain the lease through cleanup,

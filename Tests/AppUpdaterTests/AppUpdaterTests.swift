@@ -437,7 +437,7 @@ final class EventTests: XCTestCase {
         await settle()
         XCTAssertEqual(log.events, [.init(kind: .shown, fromVersion: "1.0", toVersion: "2.0", trigger: .launch, error: nil)])
         XCTAssertEqual(updater.state, .available(version: "2.0"))
-        XCTAssertEqual(updater.pillContent()?.text, "Update available")
+        XCTAssertEqual(updater.pillContent()?.text, "Update")
         XCTAssertFalse(updater.isInstalling)
     }
 

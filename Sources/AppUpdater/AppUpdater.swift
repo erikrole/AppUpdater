@@ -3,11 +3,12 @@ import os
 import Foundation
 
 /// Checks a GitHub releases repository for a newer build of this app and installs it quietly. There is no splash and no
-/// modal: a small pill at the top-right of the host window (or under its menu bar item) shows "Updating", then
-/// "Restart to update", and on the first launch of the new version a "What's new" pill with a few release-note bullets.
+/// modal: a small button in the trailing side of the host window's title bar reads "Update" (when a download waits for a
+/// click), "Updating", "Restart", and on the first launch of the new version "What's new" with a few release-note bullets.
+/// Menu bar apps have no title bar: they show `menuItem` (or `menuTitle`) as the first row of their menu.
 ///
 ///     let updater = AppUpdater(.init(repository: "erikrole/offload-releases", assetName: "Offload.dmg"))
-///     updater.hostView = window.contentView   // or statusItem.button for a menu bar app
+///     menu.insertItem(updater.menuItem, at: 0)  // menu bar apps only; window apps need no layout code
 ///     updater.checkOnLaunch()          // applicationDidFinishLaunching
 ///     updater.checkNow()               // "Check for Updates…" menu item
 @MainActor
@@ -180,8 +181,8 @@ public final class AppUpdater {
     private var offeredVersions: Set<String> = []
     let pill = PillController()
 
-    /// The view the pill hangs from, top-right: the window's content view, or a menu bar app's `statusItem.button`
-    /// (the pill then sits under the item). This one line is all a host adds. Unset, the pill uses the main window.
+    /// Deprecated: the update button now lives in the title bar of the main (else key) window by itself. If set, its window hosts
+    /// the button instead. Menu bar apps have no title bar: show `menuTitle` / `menuItem` as the first row of the menu.
     public weak var hostView: NSView? { didSet { pill.refresh() } }
     /// Convenience for `hostView = window?.contentView`.
     public var hostWindow: NSWindow? {
@@ -194,14 +195,15 @@ public final class AppUpdater {
         didSet {
             guard state != oldValue else { return }
             refreshPill()
+            refreshMenuItem()
             onStateChange?(state)
         }
     }
     /// Called on the main actor whenever `state` changes.
     public var onStateChange: (@MainActor (State) -> Void)?
 
-    /// Text for a menu item that mirrors the pill: "Restart to update", "Update failed. Retry" or "Update available",
-    /// nil when there's nothing to do. `performPrimaryAction()` does what the pill's click does.
+    /// Text for a menu item that mirrors the title bar button: "Restart to update", "Update failed. Retry" or "Update available",
+    /// nil when there's nothing to do. `performPrimaryAction()` does what the button's click does.
     public var menuTitle: String? {
         switch state {
         case .ready: "Restart to update"
@@ -209,6 +211,30 @@ public final class AppUpdater {
         case .available: "Update available"
         case .idle, .updating: nil
         }
+    }
+
+    /// A ready-made menu item for AppKit menus (put it first). Hidden when there is nothing to do, disabled while updating,
+    /// and its action is `performPrimaryAction()`. Keep it up to date from `onStateChange`, or call `refreshMenuItem()`.
+    public lazy var menuItem: NSMenuItem = {
+        let item = NSMenuItem(title: "", action: #selector(menuItemClicked), keyEquivalent: "")
+        item.target = self
+        item.isHidden = true
+        return item
+    }()
+
+    @objc private func menuItemClicked() { performPrimaryAction() }
+
+    /// Syncs `menuItem` to `state`. Called automatically on every state change.
+    public func refreshMenuItem() {
+        if case .updating = state {
+            menuItem.title = "Updating…"
+            menuItem.isHidden = false
+            menuItem.isEnabled = false
+            return
+        }
+        menuItem.title = menuTitle ?? ""
+        menuItem.isHidden = menuTitle == nil
+        menuItem.isEnabled = true
     }
 
     /// The release behind the current state, for retrying and for the "Installing vX" hover.
@@ -271,7 +297,7 @@ public final class AppUpdater {
     func checkInBackground(shouldPresent: @MainActor () -> Bool = { true },
                            offer: @MainActor (ReleaseInfo) -> Void) async -> CheckOutcome? {
         guard !Task.isCancelled, !checking, !isInstalling, !isBusyUpdating,
-              configuration.busyReason() == nil, shouldPresent() else { return nil }
+              !busyHoldsBackOffer, shouldPresent() else { return nil }
         if !preparedBackgroundChecks {
             preparedBackgroundChecks = true
             UpdateInstaller.sweepLeftovers(for: configuration.appURL)
@@ -282,7 +308,7 @@ public final class AppUpdater {
         let channel = configuration.channel()
         let outcome = await evaluate(userInitiated: false)
         guard !Task.isCancelled, !isInstalling, !isBusyUpdating, configuration.channel() == channel,
-              configuration.busyReason() == nil, shouldPresent() else { return nil }
+              !busyHoldsBackOffer, shouldPresent() else { return nil }
         if case let .available(release) = outcome, !offeredVersions.contains(release.version) {
             rememberOffer(release)
             offer(release)
@@ -405,7 +431,7 @@ public final class AppUpdater {
         } else if failureCount(for: release.version) >= Self.maxAutoInstallFailures {
             failureVisible = false
             state = .failed(message: "Couldn't install \(release.version).")
-        } else if configuration.busyReason() == nil {
+        } else if !busyHoldsBackOffer {
             // Beta, or automatic updates are switched off: wait for a click instead of downloading.
             state = .available(version: release.version)
             emit(.shown, release, trigger: trigger ?? .launch)
@@ -474,6 +500,11 @@ public final class AppUpdater {
 
     /// A version that fails to install or to launch this many times stops installing itself and asks instead.
     static let maxAutoInstallFailures = 2
+
+    /// A busy host holds back an offer only when the offer would start a download on its own (automatic install on). With it off
+    /// the button just waits for a click, and install, staging and restart each check `busyReason` themselves, so a busy app still
+    /// shows "Update" and simply refuses to download or relaunch until the work is done.
+    var busyHoldsBackOffer: Bool { configuration.autoInstall() && configuration.busyReason() != nil }
 
     /// Whether a launch check may install `release` without asking: opted in, stable, not failing, host idle.
     func shouldAutoInstall(_ release: ReleaseInfo) -> Bool {
@@ -727,9 +758,9 @@ public final class AppUpdater {
         case let .updating(version):
             return PillContent(indicator: .spinner, text: "Updating", hoverText: "Installing v\(version)", clickable: false)
         case .ready:
-            return PillContent(indicator: .dot, text: "Restart to update", hoverText: nil, clickable: true)
+            return PillContent(indicator: .dot, text: "Restart", hoverText: nil, clickable: true)
         case .available:
-            return PillContent(indicator: .dot, text: "Update available", hoverText: nil, clickable: true)
+            return PillContent(indicator: .dot, text: "Update", hoverText: nil, clickable: true)
         case .failed where failureVisible:
             return PillContent(indicator: .warning, text: "Update failed. Retry", hoverText: nil, clickable: true)
         case .failed, .idle:

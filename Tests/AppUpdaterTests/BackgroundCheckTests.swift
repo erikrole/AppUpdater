@@ -28,10 +28,10 @@ private final class BackgroundChannel: @unchecked Sendable {
             return (Data((list ? "[" + json + "]" : json).utf8), 200)
         }
     }
-    private func make(_ feed: Feed, state: State = State(), defaults: UserDefaults? = nil, channel: BackgroundChannel = BackgroundChannel()) -> AppUpdater {
+    private func make(_ feed: Feed, state: State = State(), defaults: UserDefaults? = nil, channel: BackgroundChannel = BackgroundChannel(), autoInstall: Bool = true) -> AppUpdater {
         let updater = AppUpdater(.init(repository: "erikrole/offload-releases", assetName: "Offload.dmg",
             bundleIdentifier: "com.erole.BackgroundTests", appURL: URL.temporaryDirectory.appending(path: "BackgroundTests-" + UUID().uuidString + "/Test.app"),
-            minimumCheckInterval: 0, currentVersion: "2.0.0", busyReason: { state.busy ? "Working" : nil }, postUpdate: .quiet, channel: { channel.get() }),
+            minimumCheckInterval: 0, currentVersion: "2.0.0", busyReason: { state.busy ? "Working" : nil }, postUpdate: .quiet, channel: { channel.get() }, autoInstall: { autoInstall }),
             defaults: defaults ?? testDefaults("BackgroundChecks"))
         updater.fetch = { url in await feed.fetch(list: url.path.hasSuffix("/releases")) }
         return updater
@@ -54,6 +54,16 @@ private final class BackgroundChannel: @unchecked Sendable {
         await feed.set("2.1.0")
         _ = await updater.checkInBackground { offers.append($0.version) }
         XCTAssertEqual(offers, ["2.1.0", "2.2.0"])
+    }
+    func testBusyHostStillShowsTheUpdateButtonWhenAutoInstallIsOff() async {
+        let feed = Feed(), state = State(), updater = make(feed, state: state, autoInstall: false)
+        await feed.set("2.1.0")
+        state.busy = true
+        _ = await updater.checkInBackground()
+        XCTAssertEqual(updater.state, .available(version: "2.1.0"), "the button waits for a click while the host is busy")
+        updater.performPrimaryAction()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertNotEqual(updater.state, .ready(version: "2.1.0"), "but nothing downloads or installs while busy")
     }
     func testBusyOrInactiveNeverFetches() async {
         let feed = Feed(), state = State(), updater = make(feed, state: state)
