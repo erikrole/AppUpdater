@@ -297,7 +297,7 @@ public final class AppUpdater {
     func checkInBackground(shouldPresent: @MainActor () -> Bool = { true },
                            offer: @MainActor (ReleaseInfo) -> Void) async -> CheckOutcome? {
         guard !Task.isCancelled, !checking, !isInstalling, !isBusyUpdating,
-              configuration.busyReason() == nil, shouldPresent() else { return nil }
+              !busyHoldsBackOffer, shouldPresent() else { return nil }
         if !preparedBackgroundChecks {
             preparedBackgroundChecks = true
             UpdateInstaller.sweepLeftovers(for: configuration.appURL)
@@ -308,7 +308,7 @@ public final class AppUpdater {
         let channel = configuration.channel()
         let outcome = await evaluate(userInitiated: false)
         guard !Task.isCancelled, !isInstalling, !isBusyUpdating, configuration.channel() == channel,
-              configuration.busyReason() == nil, shouldPresent() else { return nil }
+              !busyHoldsBackOffer, shouldPresent() else { return nil }
         if case let .available(release) = outcome, !offeredVersions.contains(release.version) {
             rememberOffer(release)
             offer(release)
@@ -431,7 +431,7 @@ public final class AppUpdater {
         } else if failureCount(for: release.version) >= Self.maxAutoInstallFailures {
             failureVisible = false
             state = .failed(message: "Couldn't install \(release.version).")
-        } else if configuration.busyReason() == nil {
+        } else if !busyHoldsBackOffer {
             // Beta, or automatic updates are switched off: wait for a click instead of downloading.
             state = .available(version: release.version)
             emit(.shown, release, trigger: trigger ?? .launch)
@@ -500,6 +500,11 @@ public final class AppUpdater {
 
     /// A version that fails to install or to launch this many times stops installing itself and asks instead.
     static let maxAutoInstallFailures = 2
+
+    /// A busy host holds back an offer only when the offer would start a download on its own (automatic install on). With it off
+    /// the button just waits for a click, and install, staging and restart each check `busyReason` themselves, so a busy app still
+    /// shows "Update" and simply refuses to download or relaunch until the work is done.
+    var busyHoldsBackOffer: Bool { configuration.autoInstall() && configuration.busyReason() != nil }
 
     /// Whether a launch check may install `release` without asking: opted in, stable, not failing, host idle.
     func shouldAutoInstall(_ release: ReleaseInfo) -> Bool {

@@ -4,6 +4,7 @@
 
 - Replace the floating pill with a dedicated spot: a small button in the trailing side of the host window's title bar (`NSTitlebarAccessoryViewController`). Copy: Update, Updating, Restart, What's new, Update failed. Retry. Windows need no layout code; `hostView` / `hostWindow` still compile but are deprecated.
 - Menu bar and windowless apps: new `updater.menuItem` (an `NSMenuItem`, first row of the menu) alongside `menuTitle`, `performPrimaryAction()` and `onStateChange`. The status-item-anchored pill is removed.
+- A busy host no longer hides the "Update" button when `autoInstall` is off (it just waits for a click); staging, install and restart still refuse while `busyReason` is set. With auto-install on, a busy host still defers the offer as before.
 - `UpdaterPreview --render` now draws the sample's own views into the image instead of capturing the screen.
 
 ## 2026-11-02
