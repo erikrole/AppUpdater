@@ -1,18 +1,22 @@
 # AppUpdater
 
 A small, dependency-free AppKit updater for Erik's own macOS apps (Swift 6, macOS 26 or later). Apps check a public GitHub
-releases repository on launch and, when there's an update, download it quietly. There is **no splash and no modal**: a small
-pill at the top-right of the app's window shows the progress. No Sparkle, no appcast, no helper tool.
+releases repository on launch and, when there's an update, download it quietly. There is **no splash, no modal and nothing floating**:
+a small button in the trailing side of the app's title bar (a dedicated spot, like Claude and Codex) shows the state. Windows need no layout
+code: AppUpdater adds it as a title bar accessory to the main window. Menu bar apps have no title bar, so they show the state as the first
+row of their menu (`updater.menuItem`). No Sparkle, no appcast, no helper tool.
 
-| Pill | Meaning |
+| Button | Meaning |
 |---|---|
-| spinner **Updating** (hover: *Installing v1.5.3*) | downloading and verifying; fades into the next pill |
-| dot **Restart to update** | the update is verified and waiting; a click installs and relaunches. It never nags |
+| dot **Update** | a newer release was found but not downloaded (auto-install off, or a beta); a click downloads it |
+| spinner **Updating** (hover: *Installing v1.5.3*) | downloading and verifying; becomes Restart |
+| dot **Restart** | the update is verified and waiting; a click installs and relaunches. It never nags |
 | dot **What's new** | first launch after an update: hover or click opens a popover with 2 to 5 bullets from the release body and a *Full notes* link. Gone once opened or after 3 days; not shown when the release has no notes |
 | **Update failed. Retry** | shown after a manual check or a retry; at launch a failure is silent and retried at the next launch |
 
-Screenshots: [updating](docs/quiet-updates/updating.png), [restart](docs/quiet-updates/ready.png),
-[what's new](docs/quiet-updates/whatsnew-open.png) ([dark](docs/quiet-updates/whatsnew-open-dark.png)), [failed](docs/quiet-updates/failed.png).
+Nothing shows when there is nothing to do. Screenshots (drawn from the sample app's own views): [update](docs/titlebar/available.png),
+[updating](docs/titlebar/updating.png), [restart](docs/titlebar/ready.png), [failed](docs/titlebar/failed.png),
+[what's new](docs/titlebar/whatsnew-open.png) ([dark](docs/titlebar/whatsnew-open-dark.png)).
 
 ## Integrate (5 lines)
 
@@ -26,21 +30,22 @@ import AppUpdater
 
 let updater = AppUpdater(.init(repository: "erikrole/offload-releases", assetName: "Offload.dmg"))
 // applicationDidFinishLaunching:
-updater.hostView = window.contentView   // the pill hangs top-right of this view; a menu bar app passes statusItem.button
-updater.checkOnLaunch()
+updater.checkOnLaunch()   // window apps: the title bar button appears by itself
+menu.insertItem(updater.menuItem, at: 0)   // menu bar apps (no title bar): first row of the menu; hidden when idle
 // "Check for Updates…" menu item:
 updater.checkNow()
 ```
 
 Optional configuration (all have defaults):
-- `updater.hostView` (or `hostWindow`) anchors the pill. Unset, it uses the main window. For a menu bar app pass
-  `statusItem.button` and the pill sits under the item. A menu can mirror the pill: `updater.menuTitle` ("Restart to update",
-  "Update failed. Retry", "Update available", else nil), `performPrimaryAction()`, `retry()`, `restartToUpdate()`, and
-  `state` / `onStateChange` (`.idle`, `.updating`, `.ready`, `.available`, `.failed`).
-- `style: .init(accentColor:)` tints the pill's dot (default: system accent). The other `Style` fields no longer do anything.
+- Window apps add nothing: the button goes in the main (else key) window's title bar and moves if that window closes. `updater.hostView` /
+  `hostWindow` are deprecated; if set, that view's window hosts the button. Menu bar apps (SwiftUI `MenuBarExtra` included) use
+  `updater.menuItem` (an `NSMenuItem`; hidden when idle, "Updating…" disabled, "Update available", "Restart to update",
+  "Update failed. Retry") or build their own row from `updater.menuTitle`, `performPrimaryAction()`, `retry()`, `restartToUpdate()`, and
+  `state` / `onStateChange` (`.idle`, `.updating`, `.ready`, `.available`, `.failed`). There is no floating fallback.
+- `style: .init(accentColor:)` tints the button's dot (default: system accent). The other `Style` fields no longer do anything.
 - `autoInstall: { settings.autoUpdate }` (default `{ true }`) lets a launch check download a stable update on its own; wire it to a Settings switch.
-  With it off, or for a beta, the pill reads "Update available" and a click starts the download. A busy host waits for the next launch;
-  a version that failed twice stops downloading by itself (retry from the menu or the pill). A manual check always downloads.
+  With it off, or for a beta, the button reads "Update" and a click starts the download. A busy host waits for the next launch;
+  a version that failed twice stops downloading by itself (retry from the menu or the button). A manual check always downloads.
 - `channel: { settings.beta ? .beta : .production }` picks stable or beta releases.
 - `busyReason: { model.isCopying ? "Offload is busy with a copy." : nil }` holds the update back and shows the reason.
   It is checked before the download and again right before the swap.
@@ -56,8 +61,8 @@ For release builds, pin a reviewed commit or tag in the host's package configura
 Updating this package's `main` does not update an already installed app: each host must resolve the new revision, pass its
 own checks, and ship a new build. See [the October 2026 audit](docs/audit-2026-10-23.md) for the original inventory and [host adoption verification](docs/adoption-2026-10-23.md) for the completed integrations.
 
-Preview the pill: `swift run UpdaterPreview --state updating|ready|available|failed|whatsnew|whatsnew-open` (`--dark`, `--menubar`,
-`--render out.png` saves a composed screenshot of the app's own windows).
+Preview the button: `swift run UpdaterPreview --state updating|ready|available|failed|whatsnew|whatsnew-open` (`--dark`, `--menubar`,
+`--render out.png` saves an image drawn from the app's own views (never the screen)).
 
 ## What it does
 
@@ -85,7 +90,7 @@ Preview the pill: `swift run UpdaterPreview --state updating|ready|available|fai
   Rollback preserves the installed app when the backup is missing and reports restoration failures. Cancel ends the
   download after the active preparation tool finishes and its temporary files and mount are cleaned up; it never proceeds
   to the swap. Downloads allow 60 seconds of inactivity and 15 minutes overall, and require HTTPS from the first request.
-- **After updating:** by default the new version shows the "What's new" pill. Set `postUpdate: .quiet` in the configuration for nothing at all; the `.installed` event still fires, so the host can show its own note.
+- **After updating:** by default the new version shows the "What's new" button. Set `postUpdate: .quiet` in the configuration for nothing at all; the `.installed` event still fires, so the host can show its own note.
 - Refuses to update a copy running from a disk image or a translocated path; asks to move it to Applications.
   A destination that is itself a symbolic link is also refused; open the original app to update it.
 
@@ -113,7 +118,7 @@ After the swap, AppUpdater asks the app to quit with `AppUpdater.requestQuit()`.
 not from inside the install task. This matters if your `applicationShouldTerminate` returns `.terminateLater` and replies from
 a Swift task (to save first): called from inside a main-actor task, `terminate:` blocks that task's job, so your reply task can
 never run and the update hangs on "Relaunching…". If you start a quit yourself from a task, use `requestQuit()` too.
-If the app is still open 5 seconds later the pill goes back to **Restart to update** (a click asks to quit again). A host that wants
+If the app is still open 5 seconds later the button goes back to **Restart** (a click asks to quit again). A host that wants
 to give up calls `cancelPendingQuit()`: it ends the relaunch helper, puts the previous version back and lets the update start again.
 If restoration fails, the error is logged and the backup is preserved for another attempt.
 
@@ -127,11 +132,11 @@ can't hold up the update). It can't change the flow. Every event carries `fromVe
 
 | `kind` | when |
 |---|---|
-| `shown` | the "Update available" pill appeared (`trigger`: `.launch` or `.manual`) |
+| `shown` | the "Update" button appeared (`trigger`: `.launch` or `.manual`) |
 | `accepted` | a download started (again on a retry) |
 | `skipped` | `skip(_:)` was called (the version is then ignored by launch checks) |
 | `deferred` | no longer sent (there is no window to dismiss) |
-| `installed` | the **new** version, on its first launch after a successful update (same moment as the What's new pill) |
+| `installed` | the **new** version, on its first launch after a successful update (same moment as the What's new button) |
 | `failed` | the install failed; `error` says why |
 
 ```swift
@@ -154,7 +159,7 @@ The release body feeds the What's new popover (top-level bullets, up to five). S
 
 The scripts live in this repo's `scripts/`; call them by path from a checkout of AppUpdater (or copy them into the app's repo).
 
-The What's new pill shows the GitHub release body, so release scripts should generate it and refuse to publish an empty one.
+The What's new button shows the GitHub release body, so release scripts should generate it and refuse to publish an empty one.
 
 ```sh
 scripts/release-notes.sh > notes.md          # commits since the last tag → "## headline" + "- **Subject.** body" bullets

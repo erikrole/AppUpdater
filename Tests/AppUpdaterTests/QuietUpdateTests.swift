@@ -46,7 +46,7 @@ final class QuietUpdateTests: XCTestCase {
         updater.state = .updating(version: "2.1.0")
         XCTAssertEqual(updater.pillContent(), PillContent(indicator: .spinner, text: "Updating", hoverText: "Installing v2.1.0", clickable: false))
         updater.state = .ready(version: "2.1.0")
-        XCTAssertEqual(updater.pillContent()?.text, "Restart to update")
+        XCTAssertEqual(updater.pillContent()?.text, "Restart")
         XCTAssertEqual(updater.pillContent()?.clickable, true)
         XCTAssertEqual(updater.menuTitle, "Restart to update")
         updater.state = .idle
@@ -204,52 +204,59 @@ final class QuietUpdateTests: XCTestCase {
         return window
     }
 
-    func testPillAnchorsTopRightOfTheHostViewAndFollowsResizes() throws {
+    func testButtonLivesInTheTitleBarTrailingSideAndStaysThereOnResize() throws {
         let host = window()
         let updater = make()
         updater.hostView = host.contentView
         updater.state = .ready(version: "2.0")
-        let panel = try XCTUnwrap(updater.pill.panelWindow)
-        XCTAssertTrue(panel.isVisible)
-        XCTAssertTrue(host.childWindows?.contains(panel) == true, "a child window, so it moves with the host")
-        let layout = host.convertToScreen(host.contentLayoutRect)
-        XCTAssertEqual(panel.frame.maxX, layout.maxX - PillController.inset, accuracy: 0.5)
-        XCTAssertEqual(panel.frame.maxY, layout.maxY - PillController.inset, accuracy: 0.5)
-        XCTAssertEqual(panel.frame.height, PillController.height, accuracy: 0.5)
-
+        XCTAssertTrue(updater.pill.isVisible)
+        let accessories = host.titlebarAccessoryViewControllers
+        XCTAssertEqual(accessories.count, 1)
+        XCTAssertEqual(accessories.first?.layoutAttribute, .trailing)
+        XCTAssertTrue(host.childWindows?.isEmpty ?? true, "nothing floats over the content")
         host.setContentSize(NSSize(width: 640, height: 300))
         updater.pill.reposition()
-        let resized = host.convertToScreen(host.contentLayoutRect)
-        XCTAssertEqual(panel.frame.maxX, resized.maxX - PillController.inset, accuracy: 0.5)
+        XCTAssertEqual(host.titlebarAccessoryViewControllers.count, 1, "still one, still in the title bar")
     }
 
-    func testPillGrowsOnHoverToShowTheVersionAndNeverTakesFocus() throws {
+    func testButtonGrowsOnHoverToShowTheVersion() throws {
         let host = window()
         let updater = make()
         updater.hostView = host.contentView
         updater.state = .updating(version: "2.1.0")
-        let panel = try XCTUnwrap(updater.pill.panelWindow)
-        XCTAssertFalse(panel.canBecomeKey)
-        let before = panel.frame
         let view = try XCTUnwrap(updater.pill.view as? PillView)
+        let before = view.fittingSize.width
         view.mouseEntered(with: NSEvent())
-        XCTAssertGreaterThan(panel.frame.width, before.width)
-        XCTAssertEqual(panel.frame.maxX, before.maxX, accuracy: 0.5, "the right edge stays put")
+        XCTAssertGreaterThan(view.fittingSize.width, before)
         view.mouseExited(with: NSEvent())
-        XCTAssertEqual(panel.frame.width, before.width, accuracy: 0.5)
+        XCTAssertEqual(view.fittingSize.width, before, accuracy: 0.5)
     }
 
-    func testPillGoesAwayWhenThereIsNothingToSay() throws {
+    func testButtonGoesAwayWhenThereIsNothingToSay() throws {
         let host = window()
         let updater = make()
         updater.hostView = host.contentView
         updater.state = .ready(version: "2.0")
-        let panel = try XCTUnwrap(updater.pill.panelWindow)
+        XCTAssertEqual(host.titlebarAccessoryViewControllers.count, 1)
         updater.state = .idle
-        let deadline = Date().addingTimeInterval(2)
-        while panel.isVisible, Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
-        XCTAssertFalse(panel.isVisible)
-        XCTAssertNil(host.childWindows?.first { $0 === panel })
+        XCTAssertFalse(updater.pill.isVisible)
+        XCTAssertTrue(host.titlebarAccessoryViewControllers.isEmpty)
+    }
+
+    func testWithoutAWindowTheMenuItemCarriesTheState() {
+        let updater = make()
+        XCTAssertTrue(updater.menuItem.isHidden)
+        updater.state = .available(version: "2.0")
+        XCTAssertFalse(updater.menuItem.isHidden)
+        XCTAssertEqual(updater.menuItem.title, "Update available")
+        updater.state = .updating(version: "2.0")
+        XCTAssertEqual(updater.menuItem.title, "Updating…")
+        XCTAssertFalse(updater.menuItem.isEnabled)
+        updater.state = .ready(version: "2.0")
+        XCTAssertEqual(updater.menuItem.title, "Restart to update")
+        XCTAssertTrue(updater.menuItem.isEnabled)
+        updater.state = .idle
+        XCTAssertTrue(updater.menuItem.isHidden)
     }
 
     func testRetryRestartsTheDownloadOfTheReleaseThatFailed() async {

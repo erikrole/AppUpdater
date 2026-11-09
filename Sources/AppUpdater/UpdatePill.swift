@@ -1,13 +1,13 @@
 import AppKit
 
-/// What the pill shows right now. Copy stays this short on purpose.
+/// What the update button shows right now. Copy stays this short on purpose.
 struct PillContent: Equatable {
     enum Indicator: Equatable { case spinner, dot, warning, check }
     var indicator: Indicator
     var text: String
-    /// Replaces `text` while the pointer is over the pill ("Installing v1.5.3").
+    /// Replaces `text` while the pointer is over the button ("Installing v1.5.3").
     var hoverText: String?
-    /// Whether clicking does anything. A spinner-only pill ignores clicks.
+    /// Whether clicking does anything. A spinner-only button ignores clicks.
     var clickable: Bool
     /// Whether hovering or clicking opens the release-notes popover.
     var opensNotes: Bool = false
@@ -20,25 +20,28 @@ struct NotesPopoverContent {
     var pageURL: URL?
 }
 
-/// The small floating pill anchored to the top-right of the host's window or view (or under a menu bar item).
-/// It is a borderless child panel, so it never takes focus, never changes the host's layout and follows the window.
+/// The update button: a small capsule in the trailing side of the host window's title bar, a dedicated spot that never
+/// floats over content, never takes focus and stays put on resize. It is a title bar accessory, so hosts add no layout code.
+/// Apps with no window (menu bar apps) show nothing here; they mirror `state` in their menu instead.
 @MainActor
 final class PillController: NSObject, NSPopoverDelegate {
-    static let height: CGFloat = 26
-    static let inset: CGFloat = 12
+    static let height: CGFloat = 22
+    static let barHeight: CGFloat = 30
+    static let trailingInset: CGFloat = 10
 
     var onClick: (() -> Void)?
-    /// Asked for the popover's content when the pill opens the notes. Return nil for nothing to show.
+    /// Asked for the popover's content when the button opens the notes. Return nil for nothing to show.
     var notesProvider: (() -> NotesPopoverContent?)?
     var onNotesOpened: (() -> Void)?
     var onNotesClosed: (() -> Void)?
+    /// A view in the window to host the button (the deprecated `hostView`). Unset: the main, else key, else first titled window.
     var anchorView: () -> NSView? = { nil }
     var accent: () -> NSColor = { .controlAccentColor }
 
     private(set) var content: PillContent?
-    private var panel: NSPanel?
+    private var accessory: NSTitlebarAccessoryViewController?
     private var pillView: PillView?
-    private weak var parent: NSWindow?
+    private weak var hostWindow: NSWindow?
     private var hovering = false
     private var popover: NSPopover?
     private var hoverTask: Task<Void, Never>?
@@ -47,8 +50,7 @@ final class PillController: NSObject, NSPopoverDelegate {
     override init() {
         super.init()
         let center = NotificationCenter.default
-        for name in [NSWindow.didResizeNotification, NSWindow.didMoveNotification, NSWindow.didBecomeMainNotification,
-                     NSWindow.willCloseNotification, NSWindow.didChangeScreenNotification] {
+        for name in [NSWindow.didBecomeMainNotification, NSWindow.didBecomeKeyNotification, NSWindow.willCloseNotification] {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.reposition() }
             })
@@ -57,8 +59,10 @@ final class PillController: NSObject, NSPopoverDelegate {
 
     isolated deinit { for observer in observers { NotificationCenter.default.removeObserver(observer) } }
 
-    var isVisible: Bool { panel?.isVisible == true }
-    var panelWindow: NSWindow? { panel }
+    /// Whether the button is installed in a window's title bar.
+    var isVisible: Bool { accessory?.parent != nil && hostWindow?.isVisible == true }
+    /// The window whose title bar holds the button.
+    var buttonWindow: NSWindow? { accessory?.parent != nil ? hostWindow : nil }
     var isPopoverShown: Bool { popover?.isShown == true }
     var view: NSView? { pillView }
 
@@ -66,134 +70,79 @@ final class PillController: NSObject, NSPopoverDelegate {
 
     func set(_ new: PillContent?) {
         guard new != content else { return }
-        let hadPill = content != nil
         content = new
         guard let new else { hide(); return }
         hovering = false
-        ensurePanel()
+        ensureAccessory()
         pillView?.apply(new, hovering: false, accent: accent())
-        resize(animated: hadPill)
+        resize()
         reposition()
-        if !hadPill || panel?.isVisible != true { fadeIn() }
     }
 
-    /// Re-reads the accent colour and anchor, for example after the host changed `hostView`.
+    /// Re-reads the accent colour and window, for example after the host changed `hostView`.
     func refresh() {
         guard let content else { return }
         pillView?.apply(content, hovering: hovering, accent: accent())
+        resize()
         reposition()
     }
 
-    // MARK: - Panel
+    // MARK: - Title bar accessory
 
-    private func ensurePanel() {
-        guard panel == nil else { return }
+    private func ensureAccessory() {
+        guard accessory == nil else { return }
         let view = PillView()
         view.onHover = { [weak self] inside in self?.hoverChanged(inside) }
         view.onClick = { [weak self] in self?.clicked() }
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 80, height: Self.height),
-                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.hidesOnDeactivate = false
-        panel.becomesKeyOnlyIfNeeded = true
-        panel.isReleasedWhenClosed = false
-        panel.collectionBehavior = [.fullScreenAuxiliary, .moveToActiveSpace]
-        panel.contentView = view
-        self.panel = panel
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 80, height: Self.barHeight))
+        container.addSubview(view)
+        let controller = NSTitlebarAccessoryViewController()
+        controller.layoutAttribute = .trailing
+        controller.view = container
+        accessory = controller
         pillView = view
     }
 
     private func hide() {
         hoverTask?.cancel()
         popover?.close()
-        guard let panel else { return }
-        let finish: @MainActor () -> Void = { [weak self, weak panel] in
-            guard let self, let panel, self.content == nil else { return }
-            self.parent?.removeChildWindow(panel)
-            self.parent = nil
-            panel.orderOut(nil)
-            panel.alphaValue = 1
-        }
-        if Self.reduceMotion || !panel.isVisible { finish(); return }
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.25
-            panel.animator().alphaValue = 0
-        }, completionHandler: { MainActor.assumeIsolated { finish() } })
+        detach()
+        accessory = nil
+        pillView = nil
     }
 
-    private func fadeIn() {
-        guard let panel else { return }
-        panel.alphaValue = Self.reduceMotion ? 1 : 0
-        reposition()
-        if !Self.reduceMotion {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.2
-                panel.animator().alphaValue = 1
-            }
-        }
+    private func detach() {
+        if accessory?.parent != nil { accessory?.removeFromParent() }
+        hostWindow = nil
     }
 
-    private static var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
-
-    private func resize(animated: Bool) {
-        guard let panel, let pillView else { return }
+    private func resize() {
+        guard let accessory, let pillView else { return }
         let size = pillView.fittingSize
-        var frame = panel.frame
-        // Keep the right edge in place when the text changes.
-        frame.origin.x += frame.width - size.width
-        frame.size = size
-        panel.setFrame(frame, display: true, animate: animated && !Self.reduceMotion && panel.isVisible)
+        let width = size.width + Self.trailingInset * 2
+        accessory.view.setFrameSize(NSSize(width: width, height: Self.barHeight))
+        pillView.frame = NSRect(x: Self.trailingInset, y: (Self.barHeight - Self.height) / 2, width: size.width, height: Self.height)
     }
 
-    // MARK: - Anchoring
-
-    /// The view the pill hangs from: the host's `hostView`, else the main (or key, or first visible) window's content, else the
-    /// app's own status item (so menu bar apps need no hostView).
-    private func anchor() -> NSView? {
-        if let view = anchorView(), view.window != nil { return view }
-        let windows = NSApp.windows.filter { $0 !== panel && $0.isVisible && !$0.isMiniaturized && !($0 is NSPanel) && $0.contentView != nil }
-        let chosen = NSApp.mainWindow.flatMap { main in windows.first { $0 === main } }
+    private func targetWindow() -> NSWindow? {
+        if let window = anchorView()?.window, window.styleMask.contains(.titled) { return window }
+        let windows = NSApp.windows.filter { $0.isVisible && !$0.isMiniaturized && !($0 is NSPanel) && $0.styleMask.contains(.titled) }
+        return NSApp.mainWindow.flatMap { main in windows.first { $0 === main } }
             ?? NSApp.keyWindow.flatMap { key in windows.first { $0 === key } }
             ?? windows.first
-        if let chosen { return chosen.contentView }
-        // A menu bar app with no window open (SwiftUI's MenuBarExtra exposes no status item): hang under its own status item.
-        return NSApp.windows.first { $0 !== panel && $0.isVisible && $0.className.contains("StatusBar") }?.contentView
     }
 
     func reposition() {
-        guard content != nil, let panel else { return }
-        guard let view = anchor(), let window = view.window else {
-            parent?.removeChildWindow(panel)
-            parent = nil
-            panel.orderOut(nil)
+        guard content != nil, let accessory else { return }
+        guard let window = targetWindow() else {
+            // Nothing to hang from (a menu bar app, or every window closed): the host's menu carries the state.
+            if hostWindow?.isVisible != true { popover?.close(); detach() }
             return
         }
-        let size = panel.frame.size
-        let isStatusItem = window.level.rawValue >= NSWindow.Level.statusBar.rawValue || window.className.contains("StatusBar")
-        var rect = window.convertToScreen(view.convert(view.bounds, to: nil))
-        if view === window.contentView { rect = window.convertToScreen(window.contentLayoutRect) }
-        var origin: NSPoint
-        if isStatusItem {
-            // Right-aligned under the menu bar item.
-            origin = NSPoint(x: rect.maxX - size.width, y: rect.minY - size.height - 4)
-            if let screen = window.screen ?? NSScreen.main {
-                origin.x = min(max(origin.x, screen.frame.minX + 4), screen.frame.maxX - size.width - 4)
-            }
-            if let parent { parent.removeChildWindow(panel); self.parent = nil }
-            panel.level = .statusBar
-        } else {
-            origin = NSPoint(x: rect.maxX - size.width - Self.inset, y: rect.maxY - size.height - Self.inset)
-            panel.level = window.level
-            if parent !== window {
-                parent?.removeChildWindow(panel)
-                window.addChildWindow(panel, ordered: .above)
-                parent = window
-            }
-        }
-        if panel.frame.origin != origin { panel.setFrameOrigin(origin) }
-        if !panel.isVisible { panel.orderFront(nil) }
+        if hostWindow === window, accessory.parent != nil { return }
+        detach()
+        window.addTitlebarAccessoryViewController(accessory)
+        hostWindow = window
     }
 
     // MARK: - Interaction
@@ -202,8 +151,7 @@ final class PillController: NSObject, NSPopoverDelegate {
         hovering = inside
         guard let content else { return }
         pillView?.apply(content, hovering: inside, accent: accent())
-        resize(animated: true)
-        reposition()
+        resize()
         hoverTask?.cancel()
         if content.opensNotes, inside, !isPopoverShown {
             hoverTask = Task { [weak self] in
@@ -224,10 +172,10 @@ final class PillController: NSObject, NSPopoverDelegate {
     }
 
     func showNotes() {
-        guard let pillView, !isPopoverShown, let notes = notesProvider?() else { return }
+        guard let pillView, pillView.window != nil, !isPopoverShown, let notes = notesProvider?() else { return }
         let popover = NSPopover()
         popover.behavior = .semitransient
-        popover.animates = !Self.reduceMotion
+        popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         popover.delegate = self
         popover.contentViewController = NotesPopoverController(notes: notes)
         self.popover = popover
@@ -316,9 +264,10 @@ private final class NotesPopoverController: NSViewController {
     }
 }
 
-/// The capsule itself: material background, an indicator and one line of text.
+
+/// The button itself: a quiet capsule tint, an indicator and one line of text.
 @MainActor
-final class PillView: NSVisualEffectView {
+final class PillView: NSView {
     var onHover: ((Bool) -> Void)?
     var onClick: (() -> Void)?
     private let label = NSTextField(labelWithString: "")
@@ -329,9 +278,6 @@ final class PillView: NSVisualEffectView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        material = .hudWindow
-        blendingMode = .behindWindow
-        state = .active
         wantsLayer = true
         layer?.cornerRadius = PillController.height / 2
         layer?.masksToBounds = true
@@ -346,8 +292,8 @@ final class PillView: NSVisualEffectView {
         dot.translatesAutoresizingMaskIntoConstraints = false
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = 7
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: 10, bottom: 0, right: 12)
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 9, bottom: 0, right: 11)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -355,21 +301,23 @@ final class PillView: NSVisualEffectView {
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-            heightAnchor.constraint(equalToConstant: PillController.height),
             spinner.widthAnchor.constraint(equalToConstant: 12),
             spinner.heightAnchor.constraint(equalToConstant: 12),
-            dot.widthAnchor.constraint(equalToConstant: 8),
-            dot.heightAnchor.constraint(equalToConstant: 8),
+            dot.widthAnchor.constraint(equalToConstant: 7),
+            dot.heightAnchor.constraint(equalToConstant: 7),
         ])
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
     }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
+    private var hoverHighlight = false
+
     func apply(_ content: PillContent, hovering: Bool, accent: NSColor) {
         let text = (hovering ? content.hoverText : nil) ?? content.text
         label.stringValue = text
         setAccessibilityLabel(text)
+        hoverHighlight = hovering && content.clickable
         spinner.stopAnimation(nil)
         let indicator: NSView
         switch content.indicator {
@@ -380,12 +328,21 @@ final class PillView: NSVisualEffectView {
         }
         stack.setViews([indicator, label], in: .leading)
         needsLayout = true
+        needsDisplay = true
     }
 
     override var fittingSize: NSSize {
         layoutSubtreeIfNeeded()
         return NSSize(width: max(stack.fittingSize.width, 60), height: PillController.height)
     }
+
+    override func updateLayer() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(hoverHighlight ? 0.14 : 0.07).cgColor
+        }
+    }
+    override var wantsUpdateLayer: Bool { true }
+    override func viewDidChangeEffectiveAppearance() { needsDisplay = true }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
