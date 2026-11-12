@@ -34,8 +34,11 @@ def main():
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.(zip|dmg)", archive_name):
         parser.error("expected a ZIP or DMG asset")
     url = f"https://github.com/{args.repository}/releases/download/{tag}/{archive_name}"
+    hasher = hashlib.sha256()
     with args.archive.open("rb") as archive:
-        digest = "sha256:" + hashlib.file_digest(archive, "sha256").hexdigest()
+        for chunk in iter(lambda: archive.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    digest = "sha256:" + hasher.hexdigest()
     if not any(asset.get("browser_download_url") == url and asset.get("digest") == digest
                for asset in release["assets"]):
         parser.error("GitHub's public asset URL or digest does not match the verified archive")
