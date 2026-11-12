@@ -28,10 +28,10 @@ private final class BackgroundChannel: @unchecked Sendable {
             return (Data((list ? "[" + json + "]" : json).utf8), 200)
         }
     }
-    private func make(_ feed: Feed, state: State = State(), defaults: UserDefaults? = nil, channel: BackgroundChannel = BackgroundChannel()) -> AppUpdater {
+    private func make(_ feed: Feed, state: State = State(), defaults: UserDefaults? = nil, interval: TimeInterval = 0, channel: BackgroundChannel = BackgroundChannel()) -> AppUpdater {
         let updater = AppUpdater(.init(repository: "erikrole/offload-releases", assetName: "Offload.dmg",
             bundleIdentifier: "com.erole.BackgroundTests", appURL: URL.temporaryDirectory.appending(path: "BackgroundTests-" + UUID().uuidString + "/Test.app"),
-            minimumCheckInterval: 0, currentVersion: "2.0.0", busyReason: { state.busy ? "Working" : nil }, postUpdate: .quiet, channel: { channel.get() }),
+            minimumCheckInterval: interval, currentVersion: "2.0.0", busyReason: { state.busy ? "Working" : nil }, postUpdate: .quiet, channel: { channel.get() }),
             defaults: defaults ?? testDefaults("BackgroundChecks"))
         updater.fetch = { url in await feed.fetch(list: url.path.hasSuffix("/releases")) }
         return updater
@@ -82,6 +82,34 @@ private final class BackgroundChannel: @unchecked Sendable {
             XCTAssertEqual(offers, ["2.1.0"])
         }
     }
+    func testScheduledCheckFindsReleaseWhileBusyAndOffersItWithoutRefetching() async {
+        let feed = Feed(), state = State(), updater = make(feed, state: state, interval: 3600)
+        await feed.set("2.1.0")
+        state.busy = true
+        _ = await updater.checkInBackground(scheduled: true) { _ in XCTFail("Busy app") }
+
+        state.busy = false
+        var offered: String?
+        _ = await updater.checkInBackground(scheduled: true) { offered = $0.version }
+        XCTAssertEqual(offered, "2.1.0")
+        let calls = await feed.count()
+        XCTAssertEqual(calls, 1)
+    }
+
+    func testReopeningWithAnOutstandingUpdateChecksBeforeTheInterval() async {
+        let feed = Feed(), defaults = testDefaults("OutstandingUpdate")
+        let first = make(feed, defaults: defaults, interval: 3600)
+        await feed.set("2.1.0")
+        _ = await first.checkInBackground(scheduled: true) { _ in }
+
+        let second = make(feed, defaults: defaults, interval: 3600)
+        var offered: String?
+        _ = await second.checkInBackground(scheduled: true) { offered = $0.version }
+        XCTAssertEqual(offered, "2.1.0")
+        let calls = await feed.count()
+        XCTAssertEqual(calls, 2)
+    }
+
     func testOverlappingChecksShareOneFetch() async {
         let feed = Feed(), updater = make(feed)
         await feed.set("2.1.0"); await feed.pause()

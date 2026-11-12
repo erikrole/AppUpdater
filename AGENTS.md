@@ -29,3 +29,11 @@ Swift 6 package, macOS 26+, AppKit only, no third-party dependencies. `swift bui
 - Test real signed payloads with `APPUPDATER_SIGNED_APP=/Applications/Fetch.app swift test -Xswiftc -warnings-as-errors` when the default Offload fixture is a local, unnotarized build. This selects a fixture; it does not skip signature/Gatekeeper checks. `APPUPDATER_FALLBACK_LIVE=1 swift test --filter ReleaseFetcherTests/testLiveFallbackWithoutAPIQuota` exercises GitHub web discovery with a forced API limit. Fetch's compatibility branch is based on e1f5004 and does not import main's automatic-install, beta, lease or quit API changes.
 
 - `checkInBackground(shouldPresent:)` is opt-in and never installs silently or raises an existing window. Recheck busy/foreground eligibility and cancellation after fetching. Preserve startup cleanup/quiet installed events, persistent Skip, manual checks and one automatic offer per newer version per process.
+
+
+- `checkOnLaunch()` starts the shared schedule. For hosts with asynchronous restoration, acknowledge successful startup
+  explicitly with `markStartupReady()` before starting the schedule. An unconfirmed backup must survive ordinary cleanup.
+- `applyOnQuitIfReady()` is opt-in and belongs only immediately before a host-approved `.terminateNow`. Verify the previous
+  backup and hold the installation lock throughout recovery. Keep first-party updates in one installer.
+- Verify a signed candidate against a disposable previous build with `swift run ReleaseCheck`. After publication, verify
+  the public bytes before refreshing the per-app stable feed.

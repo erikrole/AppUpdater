@@ -115,9 +115,11 @@ enum ReleaseFetcher {
         case invalidResponse, limited(Date?), http(Int)
         static func response(_ response: HTTPURLResponse) -> Failure {
             if response.statusCode == 429 || (response.statusCode == 403 && response.value(forHTTPHeaderField: "X-RateLimit-Remaining") == "0") {
+                let retryAfter = response.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init)
+                    .flatMap { $0.isFinite && $0 >= 0 ? Date.now.addingTimeInterval($0) : nil }
                 let reset = response.value(forHTTPHeaderField: "X-RateLimit-Reset").flatMap(Double.init)
                     .flatMap { $0.isFinite ? Date(timeIntervalSince1970: $0) : nil }
-                return .limited(reset)
+                return .limited([retryAfter, reset].compactMap { $0 }.max())
             }
             return .http(response.statusCode)
         }

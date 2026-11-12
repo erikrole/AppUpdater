@@ -48,6 +48,7 @@ enum UpdateInstaller {
         release: ReleaseInfo,
         destination: URL,
         configuration: AppUpdater.Configuration,
+        localArchive: URL? = nil,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> (staged: URL, workDirectory: URL, lease: InstallationLock) {
         try Task.checkCancellation()
@@ -55,6 +56,9 @@ enum UpdateInstaller {
         let lease = try InstallationLock(destination: destination)
         let fm = FileManager.default
         try sweepLeftoversLocked(for: destination)
+        if fm.fileExists(atPath: UpdateStartup.pending(for: destination).path) {
+            throw Failure(message: "The previous update is still waiting for startup confirmation.", isDeferral: true)
+        }
         let work = fm.temporaryDirectory.appending(path: "AppUpdater-\(UUID().uuidString)")
         try fm.createDirectory(at: work, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         do {
@@ -63,8 +67,18 @@ enum UpdateInstaller {
             let format = release.downloadURL.pathExtension.lowercased()
             guard ["dmg", "zip"].contains(format) else { throw Failure(message: "The update must be a DMG or ZIP.") }
             let payload = work.appending(path: "update.\(format)")
-            try await Downloader().fetch(release.downloadURL, to: payload, progress: progress)
+            if let localArchive {
+                try fm.copyItem(at: localArchive, to: payload)
+            } else {
+                try await Downloader().fetch(release.downloadURL, to: payload, progress: progress)
+            }
             try Task.checkCancellation()
+            if let expected = release.archiveSHA256 {
+                let digest = try await run("/usr/bin/shasum", ["-a", "256", payload.path])
+                guard digest.status == 0, digest.output.split(whereSeparator: \.isWhitespace).first == Substring(expected) else {
+                    throw Failure(message: "The download does not match the published checksum.")
+                }
+            }
 
             let contents = work.appending(path: "contents")
             try fm.createDirectory(at: contents, withIntermediateDirectories: true)
@@ -131,13 +145,22 @@ enum UpdateInstaller {
         let fm = FileManager.default
         let folder = destination.deletingLastPathComponent()
         let name = destination.lastPathComponent
-        let backup = folder.appending(path: ".\(name).backup")
+        let backup = backupURL(for: destination)
         // A crash between the two swap renames leaves the backup as the only app. Restore it first.
         if !fm.fileExists(atPath: destination.path), fm.fileExists(atPath: backup.path) {
             try fm.moveItem(at: backup, to: destination)
+            UpdateStartup.clear(for: destination)
         }
+        let pendingStartup = UpdateStartup.pending(for: destination)
+        let protectBackup = fm.fileExists(atPath: pendingStartup.path)
+            && fm.fileExists(atPath: backup.path)
+            && UpdateStartup.read(for: destination)?.isAcknowledged(for: destination) != true
+        if !protectBackup, fm.fileExists(atPath: backup.path) {
+            try fm.removeItem(at: backup)
+        }
+        if !protectBackup { UpdateStartup.clear(for: destination) }
         for item in (try? fm.contentsOfDirectory(atPath: folder.path)) ?? [] {
-            if item.hasPrefix(".\(name).update-") || item == ".\(name).backup" {
+            if item.hasPrefix(".\(name).update-") {
                 try? fm.removeItem(at: folder.appending(path: item))
             }
         }
@@ -162,6 +185,11 @@ enum UpdateInstaller {
 
     // MARK: - Verification
 
+    static func bundleInfo(_ app: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: app.appending(path: "Contents/Info.plist")) else { return nil }
+        return (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any]
+    }
+
     static func verify(_ app: URL, release: ReleaseInfo? = nil, configuration: AppUpdater.Configuration) async throws {
         // The requirement makes codesign itself insist on an Apple-anchored certificate for our Team ID.
         let requirement = "anchor apple generic and certificate leaf[subject.OU] = \"\(configuration.teamID)\""
@@ -171,15 +199,22 @@ enum UpdateInstaller {
         guard teamID(in: details.output) == configuration.teamID else {
             throw Failure(message: "The downloaded update isn't signed by the expected developer, so it wasn't installed.")
         }
-        let bundle = Bundle(url: app)
-        guard bundle?.bundleIdentifier == configuration.bundleIdentifier else {
+        let info = bundleInfo(app)
+        guard info?["CFBundleIdentifier"] as? String == configuration.bundleIdentifier else {
             throw Failure(message: "The downloaded update isn't this app, so it wasn't installed.")
         }
         // A release tagged newer than the build inside would be offered again after every install.
         if let release {
-            let built = bundle?.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+            let built = info?["CFBundleShortVersionString"] as? String ?? ""
             guard ReleaseInfo.versionsMatch(release.version, built) else {
                 throw Failure(message: "The update's version (\(built)) doesn't match the release (\(release.version)), so it wasn't installed.")
+            }
+        }
+        if let minimum = info?["LSMinimumSystemVersion"] as? String {
+            let os = ProcessInfo.processInfo.operatingSystemVersion
+            let current = "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)"
+            guard !ReleaseInfo.isNewer(minimum, than: current) else {
+                throw Failure(message: "This update requires macOS \(minimum) or later.")
             }
         }
         let assess = try await run("/usr/sbin/spctl", ["--assess", "--type", "execute", app.path])
@@ -194,13 +229,22 @@ enum UpdateInstaller {
 
     // MARK: - Swap
 
+    static func backupURL(for destination: URL) -> URL {
+        destination.deletingLastPathComponent().appending(path: ".\(destination.lastPathComponent).backup")
+    }
+
     /// Moves the current app aside and the verified one into place. Returns the backup; call `rollback` to undo.
     static func swap(destination: URL, with staged: URL) throws -> URL {
         let fm = FileManager.default
-        let backup = destination.deletingLastPathComponent().appending(path: ".\(destination.lastPathComponent).backup")
+        let backup = backupURL(for: destination)
         // Do not move the running app unless a complete staged copy still exists.
         guard fm.fileExists(atPath: staged.path) else { throw Failure(message: "The prepared update is missing. Your current version was kept.") }
-        if fm.fileExists(atPath: backup.path) { try fm.removeItem(at: backup) }
+        if fm.fileExists(atPath: backup.path) {
+            guard !fm.fileExists(atPath: UpdateStartup.pending(for: destination).path) else {
+                throw Failure(message: "A previous app backup still needs to be confirmed or restored.")
+            }
+            try fm.removeItem(at: backup)
+        }
         try fm.moveItem(at: destination, to: backup)
         do {
             try fm.moveItem(at: staged, to: destination)
@@ -226,6 +270,7 @@ enum UpdateInstaller {
             throw Failure(message: "Couldn't restore the previous version. It is preserved at \(backup.path). \(error.localizedDescription)")
         }
         if hadDestination { try? fm.removeItem(at: displaced) }
+        UpdateStartup.clear(for: destination)
     }
 
     /// Starts a detached helper that waits for this process to exit, opens the installed app as a new instance,
@@ -233,27 +278,52 @@ enum UpdateInstaller {
     /// Running it as a separate process means the old app can finish quitting (save sheets and all) first,
     /// and the swap never pulls files out from under live code that still needs them.
     @discardableResult
-    static func scheduleRelaunch(destination: URL, backup: URL, waitingFor pid: Int32 = ProcessInfo.processInfo.processIdentifier, lease: InstallationLock? = nil) throws -> pid_t {
+    static func scheduleRelaunch(
+        destination: URL, backup: URL,
+        waitingFor pid: Int32 = ProcessInfo.processInfo.processIdentifier,
+        lease: InstallationLock? = nil, startup: UpdateStartup? = nil
+    ) throws -> pid_t {
         let script = """
         while kill -0 "$1" 2>/dev/null; do /bin/sleep 0.2; done
-        if /usr/bin/open -n "$2" 9>&-; then
+        if [ -n "$4" ]; then
+          /usr/bin/open -n -W "$2" 9>&- &
+          launcher=$!
+          attempt=0
+          while kill -0 "$launcher" 2>/dev/null && [ "$attempt" -lt 300 ]; do
+            [ "$(/bin/cat "$5" 2>/dev/null)" = "$4" ] && break
+            /bin/sleep 0.2
+            attempt=$((attempt + 1))
+          done
+          if [ "$(/bin/cat "$5" 2>/dev/null)" = "$4" ]; then
+            kill "$launcher" 2>/dev/null || :
+            /bin/rm -rf "$3" && /bin/rm -f "$5" "$6"
+            exit 0
+          fi
+          if kill -0 "$launcher" 2>/dev/null; then
+            # The app is still running. Preserve both copies and let a later
+            # successful startup clean up the backup under the normal lock.
+            kill "$launcher" 2>/dev/null || :
+            exit 0
+          fi
+        elif /usr/bin/open -n "$2" 9>&-; then
           /bin/sleep 2
           /bin/rm -rf "$3"
-        else
-          if [ -d "$3" ]; then
-            displaced="$2.failed-$$"
-            had_destination=0
-            if [ -e "$2" ] || [ -L "$2" ]; then
-              [ ! -e "$displaced" ] && [ ! -L "$displaced" ] || exit 1
-              /bin/mv "$2" "$displaced" || exit 1
-              had_destination=1
-            fi
-            if /bin/mv "$3" "$2"; then
-              if [ "$had_destination" = 1 ]; then /bin/rm -rf "$displaced"; fi
-              /usr/bin/open -n "$2" 9>&-
-            elif [ "$had_destination" = 1 ]; then
-              /bin/mv "$displaced" "$2"
-            fi
+          exit 0
+        fi
+        if [ -d "$3" ]; then
+          displaced="$2.failed-$$"
+          had_destination=0
+          if [ -e "$2" ] || [ -L "$2" ]; then
+            [ ! -e "$displaced" ] && [ ! -L "$displaced" ] || exit 1
+            /bin/mv "$2" "$displaced" || exit 1
+            had_destination=1
+          fi
+          if /bin/mv "$3" "$2"; then
+            /bin/rm -f "$5" "$6"
+            if [ "$had_destination" = 1 ]; then /bin/rm -rf "$displaced"; fi
+            /usr/bin/open -n "$2" 9>&-
+          elif [ "$had_destination" = 1 ]; then
+            /bin/mv "$displaced" "$2"
           fi
         fi
         """
@@ -281,7 +351,9 @@ enum UpdateInstaller {
             let status = posix_spawn_file_actions_adddup2(&actions, leaseSource, 9)
             guard status == 0 else { throw Failure(message: "Couldn't pass the installation lock to the relaunch helper (\(status)).") }
         }
-        let arguments = ["/bin/sh", "-c", script, "sh", String(pid), destination.path, backup.path]
+        let arguments = ["/bin/sh", "-c", script, "sh", String(pid), destination.path, backup.path,
+                         startup?.token.uuidString ?? "", UpdateStartup.confirmation(for: destination).path,
+                         UpdateStartup.pending(for: destination).path]
         let cArguments = arguments.map { strdup($0) } + [nil]
         defer { cArguments.forEach { free($0) } }
         var child: pid_t = 0

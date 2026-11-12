@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Check on launch, wake, reconnect and while running. Retry transient errors with backoff and retain update offers while a host is busy.
+- Keep the backup until a healthy startup. Add opt-in installation on ordinary quit and a verified companion recovery API.
+- Support per-app stable feeds, archive SHA-256 verification, macOS compatibility, local update status and an isolated release check.
+
+
 ## 2026-11-02
 
 - Add opt-in background update prompts with post-fetch busy/eligibility checks, cancellation, one offer per new version per run, persistent Skip and unchanged manual checks. Existing launch/install behavior remains available.

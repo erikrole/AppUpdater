@@ -10,9 +10,13 @@ public struct ReleaseInfo: Sendable, Equatable {
     public let date: Date?
     /// True for a GitHub prerelease or a `-beta.N` version. Only the beta channel ever sees these.
     public let isPrerelease: Bool
+    /// SHA-256 of the exact published archive, when the release supplies one.
+    public let archiveSHA256: String?
 
-    public init(version: String, notes: String, downloadURL: URL, pageURL: URL? = nil, date: Date? = nil, isPrerelease: Bool = false) {
+    public init(version: String, notes: String, downloadURL: URL, pageURL: URL? = nil, date: Date? = nil,
+                isPrerelease: Bool = false, archiveSHA256: String? = nil) {
         self.isPrerelease = isPrerelease
+        self.archiveSHA256 = archiveSHA256
         self.version = version
         self.notes = notes
         self.downloadURL = downloadURL
@@ -65,6 +69,15 @@ public struct ReleaseInfo: Sendable, Equatable {
         return (parts.map(normalized), beta)
     }
 
+    private static func parseSHA256(_ digest: String) -> String? {
+        guard digest.hasPrefix("sha256:") else { return nil }
+        let hex = digest.dropFirst(7)
+        guard hex.utf8.count == 64, hex.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+            return nil
+        }
+        return String(hex)
+    }
+
     private static func versionParts(_ text: String) -> [String]? { version(text)?.parts }
 
     /// Reads GitHub's release JSON. Prefers a versioned native-architecture asset, then a versioned or stable asset.
@@ -103,11 +116,7 @@ public struct ReleaseInfo: Sendable, Equatable {
         guard allowPrerelease || !prerelease else { return nil }
         let version = String((tag.first == "v" || tag.first == "V") ? tag.dropFirst() : tag[...])
         let assets = (root["assets"] as? [[String: Any]]) ?? []
-        func url(_ name: String) -> URL? {
-            assets.first { ($0["name"] as? String) == name }
-                .flatMap { $0["browser_download_url"] as? String }
-                .flatMap(URL.init(string:))
-        }
+
         let base = (assetName as NSString).deletingPathExtension
         let ext = (assetName as NSString).pathExtension
         guard ["dmg", "zip"].contains(ext.lowercased()) else { return nil }
@@ -118,7 +127,8 @@ public struct ReleaseInfo: Sendable, Equatable {
         #endif
         let candidates = ["\(base)-\(version)-\(architecture).\(ext)", "\(base)-\(version)-universal.\(ext)",
                           "\(base)-\(version).\(ext)", "\(base)-\(architecture).\(ext)", assetName]
-        guard let download = candidates.lazy.compactMap({ url($0) }).first,
+        guard let asset = candidates.lazy.compactMap({ name in assets.first { ($0["name"] as? String) == name } }).first,
+              let download = (asset["browser_download_url"] as? String).flatMap(URL.init(string:)),
               download.scheme == "https", download.host == "github.com",
               download.user == nil, download.password == nil, download.port == nil || download.port == 443 else { return nil }
         let page = (root["html_url"] as? String).flatMap(URL.init(string:)).flatMap { url in
@@ -132,7 +142,8 @@ public struct ReleaseInfo: Sendable, Equatable {
             downloadURL: download,
             pageURL: page,
             date: date,
-            isPrerelease: prerelease
+            isPrerelease: prerelease,
+            archiveSHA256: (asset["digest"] as? String).flatMap(Self.parseSHA256)
         )
     }
 }
