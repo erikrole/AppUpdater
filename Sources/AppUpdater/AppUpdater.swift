@@ -1,6 +1,7 @@
 import AppKit
 import os
 import Foundation
+import Observation
 
 /// Checks a GitHub releases repository for a newer build of this app and installs it quietly. There is no splash and no
 /// modal: a small pill at the top-right of the host window (or under its menu bar item) shows "Updating", then
@@ -199,12 +200,21 @@ public final class AppUpdater {
         set { hostView = newValue?.contentView }
     }
 
-    /// Where the update stands. Observe with `onStateChange`.
-    public internal(set) var state: State = .idle {
-        didSet {
-            guard state != oldValue else { return }
+    @Observable @MainActor
+    final class Presentation {
+        var state: State = .idle
+    }
+
+    private let presentation = Presentation()
+
+    /// Where the update stands. SwiftUI can observe it directly, or AppKit can use `onStateChange`.
+    public internal(set) var state: State {
+        get { presentation.state }
+        set {
+            guard newValue != presentation.state else { return }
+            presentation.state = newValue
             refreshPill()
-            onStateChange?(state)
+            onStateChange?(newValue)
             recordStatus()
         }
     }
@@ -402,6 +412,12 @@ public final class AppUpdater {
             else { clearOffer(); checkNow() }
         case .idle, .updating: break
         }
+    }
+
+    /// Pair with `menuTitle` to make the same control check or perform the current update action.
+    public func performMenuAction() {
+        if menuTitle != nil { performPrimaryAction() }
+        else { checkNow() }
     }
 
     /// Installs the downloaded update and relaunches. Does nothing unless the state is `.ready` (or a quit is still waiting,
