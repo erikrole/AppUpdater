@@ -21,6 +21,11 @@ final class Delegate: NSObject, NSApplicationDelegate {
 
 MainActor.assumeIsolated {
     let app = NSApplication.shared
+    if Bundle.main.bundleIdentifier == "com.erole.AppUpdaterStartupProbe" {
+        if Bundle.main.object(forInfoDictionaryKey: "CrashBeforeReady") as? Bool == true { exit(1) }
+        AppUpdater(.init(repository: "unused/unused", assetName: "Probe.zip", postUpdate: .quiet)).markStartupReady()
+        exit(0)
+    }
     let delegate = Delegate()
     app.delegate = delegate
     app.setActivationPolicy(.prohibited)

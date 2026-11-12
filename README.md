@@ -1,8 +1,8 @@
 # AppUpdater
 
 A small, dependency-free AppKit updater for Erik's own macOS apps (Swift 6, macOS 26 or later). Apps check a public GitHub
-releases repository on launch and, when there's an update, download it quietly. There is **no splash and no modal**: a small
-pill at the top-right of the app's window shows the progress. No Sparkle, no appcast, no helper tool.
+releases repository on launch and while running and, when there's an update, download it quietly. There is **no splash and no modal**: a small
+pill at the top-right of the app's window shows the progress. A detached helper handles relaunch and rollback.
 
 | Pill | Meaning |
 |---|---|
@@ -39,14 +39,14 @@ Optional configuration (all have defaults):
   `state` / `onStateChange` (`.idle`, `.updating`, `.ready`, `.available`, `.failed`).
 - `style: .init(accentColor:)` tints the pill's dot (default: system accent). The other `Style` fields no longer do anything.
 - `autoInstall: { settings.autoUpdate }` (default `{ true }`) lets a launch check download a stable update on its own; wire it to a Settings switch.
-  With it off, or for a beta, the pill reads "Update available" and a click starts the download. A busy host waits for the next launch;
+  With it off, or for a beta, the pill reads "Update available" and a click starts the download. A busy host can offer the update when work finishes;
   a version that failed twice stops downloading by itself (retry from the menu or the pill). A manual check always downloads.
 - `channel: { settings.beta ? .beta : .production }` picks stable or beta releases.
 - `busyReason: { model.isCopying ? "Offload is busy with a copy." : nil }` holds the update back and shows the reason.
   It is checked before the download and again right before the swap.
 - `fallbackNotes: "…"` is shown when a release has no notes and none were cached from an earlier fetch. Notes are cached
   per version in `~/Library/Caches/AppUpdater/<bundle id>/`, so the window is never empty.
-- `minimumCheckInterval` (default 6 hours), `teamID` (default `T26T3G8C7Q`), `displayName`, `bundleIdentifier`, `appURL`.
+- `minimumCheckInterval` (default 1 hour), `teamID` (default `T26T3G8C7Q`), `displayName`, `bundleIdentifier`, `appURL`.
 - Block ordinary quit while `updater.isInstalling && !updater.isAwaitingRelaunch`. Once `isAwaitingRelaunch` is true,
   permit the updater quit through the host’s normal save and busy guards. Keep one updater alive for its lifetime.
   Leave `safeToExit` unset when the host must save, restore system state, or finish queued work.
@@ -61,8 +61,8 @@ Preview the pill: `swift run UpdaterPreview --state updating|ready|available|fai
 
 ## What it does
 
-- **Launch check:** at most once per 6 hours, silent when current, offline, or the version was skipped.
-  The menu item always checks and says "up to date" or "couldn't check".
+- **Automatic checks:** launch, activation, wake, reconnect and a bounded timer. Successful requests are normally at least
+  an hour apart. A discovered update waits for the host to be ready. Transport failures retry with backoff.
 - **Quiet flow:** a launch check (or a manual one) downloads and verifies the update in the background (`stage`), and
   nothing on disk changes until the person clicks **Restart to update**, which swaps, hands off to the relaunch helper and
   quits. Quitting normally instead just discards the download; the next launch fetches it again. `isInstalling` is true only
@@ -70,8 +70,8 @@ Preview the pill: `swift run UpdaterPreview --state updating|ready|available|fai
   UserDefaults (`AppUpdater.lastSeenVersion`, `AppUpdater.whatsNew`).
 - **Install:** download with progress, mount a DMG read-only or safely extract a ZIP, copy the app next to the installed one, verify
   (`codesign --verify --deep --strict`, Team ID `T26T3G8C7Q`, bundle ID, `spctl --assess`), swap with a hidden backup,
-  then quit. A detached helper waits for the old process to exit, opens the new app as a new instance and deletes the
-  backup; if the new app won't open it puts the old one back. If the app asks to finish something first (a save sheet),
+  then quit. A detached helper waits for the old process to exit and opens the new app. It keeps the backup until the
+  new host confirms startup and restores it if the new app exits before confirmation. A still-running app keeps its backup. If the app asks to finish something first (a save sheet),
   the update waits for it. Leftover staging copies and backups are swept at the next launch. The signature check also
   requires an Apple-anchored certificate for the Team ID and that the bundle version matches the release tag.
   Nothing is installed unless every check passes.
@@ -191,6 +191,29 @@ Stable checks use GitHub's API normally. If it returns 403 or 429, the updater r
 
 For a local signed-app fixture, set `APPUPDATER_SIGNED_APP=/Applications/Fetch.app`. Enable `APPUPDATER_FALLBACK_LIVE=1` for the opt-in public-web fallback check.
 
-## Automatic prompts while open
+## Automatic checks and safe quit
 
-Hosts can schedule `await updater.checkInBackground(shouldPresent: { appIsActiveAndHasNoSheet })` on launch, activation and a bounded timer. This opt-in API always offers a prompt, stays quiet when current/offline, defers while busy, and rechecks eligibility after fetching. It never raises an existing update window. Later suppresses that version until the next launch; a newer version can still appear. Skip remains persistent and manual checks remain available. Startup cleanup and quiet post-update events run once. Hosts own scheduling and should disable silent launch installation with `autoInstall: { false }` when using prompts throughout.
+`checkOnLaunch()` acknowledges startup and starts checks for the lifetime of a simple host. For a host with asynchronous
+restoration, call `markStartupReady()` after essential startup, then `startAutomaticChecks(shouldPresent:)` with its own
+presentation gate. The updater can discover an update while work is active and apply the gate before presenting it.
+Keep `busyReason` wired to the host's saves and work. Debug, test and command-only entry points should never start the schedule.
+
+Automatic download and restart are distinct choices. A host may expose an off-by-default `installOnQuit` preference and
+call `applyOnQuitIfReady()` immediately before returning `.terminateNow` for a normal quit. The next launch acknowledges
+the new version. If it cannot start, the verified backup is retained. A companion can offer a user-initiated restore
+with `restoreUnconfirmedUpdate(at:bundleIdentifier:)` after the target app has closed.
+
+`AppUpdater.Status.read(bundleIdentifier:)` reads the local snapshot for an owner status view. It includes installed and
+offered versions, channel, time of the last successful check, and restart state. Treat an absent or outdated snapshot as unknown.
+
+## Release verification and per-app feeds
+
+Run `swift run ReleaseCheck /path/to/previous.app /path/to/new.zip VERSION SHA256` before publishing. It checks the real
+signed payload and runs swap and rollback on a disposable copy using AppUpdater's installer. Run a native previous-build
+update and relaunch separately to verify host behavior. After publishing, pass the exact tested artifact to
+`scripts/verify-published-release.sh OWNER/REPO TAG ARTIFACT` to verify the public download serves those bytes.
+
+Optional `stableFeedURL` points to a per-app JSON feed on `raw.githubusercontent.com`. Generate entries with
+`scripts/update-stable-feed.py` after verifying the public asset. Each entry specifies the minimum macOS and archive SHA-256.
+The updater chooses the newest compatible stable entry and checks the checksum before extraction. Existing GitHub release
+endpoints still serve older app versions, beta, and stable feed outages. Publish a new version for corrected artifacts.

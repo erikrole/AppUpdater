@@ -61,7 +61,7 @@ public final class AppUpdater {
     /// Which releases a check may offer. Production is every app's default: stable releases only (`releases/latest`).
     /// Beta also offers prereleases (`X.Y.Z-beta.N`) and picks the newest release of either kind. An update is only ever
     /// offered when it is newer than the installed version, so leaving beta never downgrades.
-    public enum UpdateChannel: String, Sendable { case production, beta }
+    public enum UpdateChannel: String, Codable, Sendable { case production, beta }
 
     public struct Configuration: @unchecked Sendable {
         /// `owner/name` of the public releases repository.
@@ -74,7 +74,7 @@ public final class AppUpdater {
         /// Where the app is installed. Defaults to the running bundle.
         public var appURL: URL
         public var displayName: String
-        /// Launch checks are skipped if one ran more recently than this.
+        /// Minimum time between successful automatic checks.
         public var minimumCheckInterval: TimeInterval
         /// The installed version; defaults to `CFBundleShortVersionString`. Override to test.
         public var currentVersion: String
@@ -97,13 +97,15 @@ public final class AppUpdater {
         /// this prefix, such as `scratchpad-v1.5.0`, belong to this app. Checks then read the newest 100 releases instead of
         /// `releases/latest`, and the rate-limit web fallback is not used.
         public var tagPrefix: String?
+        /// Optional per-app stable feed hosted on raw.githubusercontent.com.
+        public var stableFeedURL: URL?
         /// Read at every check, so a Settings switch takes effect on the next check. Defaults to production.
         public var channel: @Sendable () -> UpdateChannel
-        /// Read at every launch check. When true (the default), a stable update found by a launch check installs itself,
-        /// quietly and at once, and the new version shows what's new when it opens. Beta releases, manual checks, a
-        /// busy host (`busyReason`), a skipped version and a version that has failed `maxAutoInstallFailures` times
-        /// don't download by themselves: they wait as "Update available" (or retry at the next launch). Hosts wire this to a Settings switch.
+        /// Whether automatic checks download and stage stable releases. This never initiates a restart.
+        /// Hosts can wire this to a Settings switch.
         public var autoInstall: @Sendable () -> Bool
+        /// Opt-in permission to apply a verified stable update on the next ordinary, host-approved quit.
+        public var installOnQuit: @Sendable () -> Bool
 
         public init(
             repository: String,
@@ -113,7 +115,7 @@ public final class AppUpdater {
             appURL: URL = Bundle.main.bundleURL,
             displayName: String = (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String)
                 ?? Bundle.main.bundleURL.deletingPathExtension().lastPathComponent,
-            minimumCheckInterval: TimeInterval = 6 * 3600,
+            minimumCheckInterval: TimeInterval = 3600,
             currentVersion: String = (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0",
             busyReason: @escaping @MainActor @Sendable () -> String? = { nil },
             style: Style = Style(),
@@ -123,12 +125,16 @@ public final class AppUpdater {
             channel: @escaping @Sendable () -> UpdateChannel = { .production },
             autoInstall: @escaping @Sendable () -> Bool = { true },
             tagPrefix: String? = nil,
+            stableFeedURL: URL? = nil,
+            installOnQuit: @escaping @Sendable () -> Bool = { false },
             onEvent: (@MainActor @Sendable (Event) -> Void)? = nil
         ) {
             self.postUpdate = postUpdate
             self.tagPrefix = tagPrefix
+            self.stableFeedURL = stableFeedURL
             self.channel = channel
             self.autoInstall = autoInstall
+            self.installOnQuit = installOnQuit
             self.safeToExit = safeToExit
             self.onEvent = onEvent
             self.style = style
@@ -174,9 +180,13 @@ public final class AppUpdater {
     let defaults: UserDefaults
     /// Fetches the latest-release JSON. Replaced in tests.
     var fetch: @Sendable (URL) async throws -> (Data, Int)
+    var fetchStableFeed: @Sendable (URL) async throws -> Data = StableReleaseFeed.fetch
     let notesCache: NotesCache
     private var checking = false
     private var preparedBackgroundChecks = false
+    private var pendingOffer: ReleaseInfo?
+    private var checkedDuringThisRun = false
+    private var automaticSchedule: AutomaticUpdateSchedule?
     private var offeredVersions: Set<String> = []
     let pill = PillController()
 
@@ -195,6 +205,7 @@ public final class AppUpdater {
             guard state != oldValue else { return }
             refreshPill()
             onStateChange?(state)
+            recordStatus()
         }
     }
     /// Called on the main actor whenever `state` changes.
@@ -240,26 +251,59 @@ public final class AppUpdater {
         pill.onNotesClosed = { [weak self] in self?.whatsNewClosed() }
         // A downloaded update that was never applied is just a leftover; the next launch sweeps it too.
         terminateObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.discardHeld() }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.automaticSchedule?.stop()
+                self.discardHeld()
+                if case .ready = self.state { self.state = .idle }
+            }
         }
     }
 
-    isolated deinit { if let terminateObserver { NotificationCenter.default.removeObserver(terminateObserver) } }
+    isolated deinit {
+        if let terminateObserver { NotificationCenter.default.removeObserver(terminateObserver) }
+        automaticSchedule?.stop()
+    }
 
     // MARK: - Public entry points
 
-    /// Call once at launch. Shows the "What's new" pill if the app was just updated, then checks quietly, at most once per
-    /// `minimumCheckInterval`. An update downloads in the background behind a small "Updating" pill.
+    /// Call once on a normal app launch to start automatic checks for this updater's lifetime.
     public func checkOnLaunch() {
-        UpdateInstaller.sweepLeftovers(for: configuration.appURL)
-        _ = showJustUpdated()
-        Task { await check(userInitiated: false, trigger: .launch) }
+        markStartupReady()
+        startAutomaticChecks()
     }
 
-    /// An opt-in check for a host's timer or activation handler. Offers a newer version once per app run: it downloads
-    /// quietly or waits as "Update available" (per `autoInstall`), and never alerts when current or offline. A skipped version
-    /// stays skipped; manual checks remain unrestricted. The host owns scheduling.
-    /// `shouldPresent` is checked before and after network I/O, so activity/sheets can defer the offer.
+    /// Checks at launch, periodically, on activation, after wake, and when the network returns.
+    /// The host controls when an update can be presented and can call this again without creating a second schedule.
+    public func startAutomaticChecks(shouldPresent: @escaping @MainActor () -> Bool = { true }) {
+        guard automaticSchedule == nil else { return }
+        prepareForChecks()
+        let schedule = AutomaticUpdateSchedule { [weak self] in
+            guard let self else { return nil }
+            return await self.checkInBackground(shouldPresent: shouldPresent, scheduled: true) { release in
+                self.handleAvailable(release, userInitiated: false, trigger: .launch)
+            }
+        }
+        automaticSchedule = schedule
+        schedule.start()
+    }
+
+    /// Call once after the host finishes essential startup and can safely accept input.
+    public func markStartupReady() {
+        UpdateStartup.acknowledge(for: configuration.appURL, version: configuration.currentVersion)
+        if preparedBackgroundChecks { UpdateInstaller.sweepLeftovers(for: configuration.appURL) }
+        prepareForChecks()
+    }
+
+    private func prepareForChecks() {
+        guard !preparedBackgroundChecks else { return }
+        preparedBackgroundChecks = true
+        UpdateInstaller.sweepLeftovers(for: configuration.appURL)
+        _ = showJustUpdated()
+        recordStatus()
+    }
+
+    /// An automatic check without starting the scheduler. A skipped version stays skipped.
     @discardableResult
     public func checkInBackground(shouldPresent: @MainActor () -> Bool = { true }) async -> CheckOutcome? {
         await checkInBackground(shouldPresent: shouldPresent, offer: { release in
@@ -268,36 +312,60 @@ public final class AppUpdater {
     }
 
     // Separate presentation from the asynchronous decision so tests never start a download.
-    func checkInBackground(shouldPresent: @MainActor () -> Bool = { true },
+    func checkInBackground(shouldPresent: @MainActor () -> Bool = { true }, scheduled: Bool = false,
                            offer: @MainActor (ReleaseInfo) -> Void) async -> CheckOutcome? {
-        guard !Task.isCancelled, !checking, !isInstalling, !isBusyUpdating,
-              configuration.busyReason() == nil, shouldPresent() else { return nil }
-        if !preparedBackgroundChecks {
-            preparedBackgroundChecks = true
-            UpdateInstaller.sweepLeftovers(for: configuration.appURL)
-            _ = showJustUpdated()
-        }
+        guard !Task.isCancelled, canCheck else { return nil }
+        prepareForChecks()
+        guard scheduled || (configuration.busyReason() == nil && shouldPresent()) else { return nil }
         checking = true
         defer { checking = false }
         let channel = configuration.channel()
-        let outcome = await evaluate(userInitiated: false)
-        guard !Task.isCancelled, !isInstalling, !isBusyUpdating, configuration.channel() == channel,
-              configuration.busyReason() == nil, shouldPresent() else { return nil }
-        if case let .available(release) = outcome, !offeredVersions.contains(release.version) {
+        let minimumInterval = scheduled ? max(300, configuration.minimumCheckInterval) : configuration.minimumCheckInterval
+        let outcome = await evaluate(userInitiated: false, minimumInterval: minimumInterval)
+        guard !Task.isCancelled, configuration.channel() == channel else { return nil }
+        switch outcome {
+        case .available(let release):
+            pendingOffer = release
+        case .upToDate, .skipped:
+            pendingOffer = nil
+            clearOffer()
+        case .failed, .tooSoon:
+            break
+        }
+        guard !isInstalling, stageTask == nil, applyTask == nil,
+              configuration.busyReason() == nil, shouldPresent() else { return scheduled ? outcome : nil }
+        if let release = pendingOffer, permits(release),
+           !offeredVersions.contains(release.version) || hasUpdatedArchive(release) {
+            pendingOffer = nil
             rememberOffer(release)
             offer(release)
         }
         return outcome
     }
 
+    private func hasUpdatedArchive(_ release: ReleaseInfo) -> Bool {
+        guard let currentRelease, ReleaseInfo.versionsMatch(release.version, currentRelease.version) else { return false }
+        return release.downloadURL != currentRelease.downloadURL
+            || (release.archiveSHA256 != nil && release.archiveSHA256 != currentRelease.archiveSHA256)
+    }
+
     func rememberOffer(_ release: ReleaseInfo) {
         offeredVersions.insert(release.version)
     }
 
-    /// A download is running or finished and waiting for the restart click.
-    private var isBusyUpdating: Bool {
-        switch state { case .updating, .ready: true
-        case .idle, .available, .failed: false }
+    private var canCheck: Bool {
+        !checking && !isInstalling && stageTask == nil && applyTask == nil
+    }
+
+    private func permits(_ release: ReleaseInfo) -> Bool {
+        configuration.channel() == .beta || (!release.isPrerelease && !ReleaseInfo.isBeta(release.version))
+    }
+
+    private func clearOffer() {
+        guard currentRelease != nil, stageTask == nil, applyTask == nil, !isInstalling else { return }
+        discardHeld()
+        currentRelease = nil
+        state = .idle
     }
 
     /// For a "Check for Updates…" menu item: always checks. A found update downloads at once (any channel); "Up to date"
@@ -330,7 +398,8 @@ public final class AppUpdater {
         case .ready: restartToUpdate()
         case .failed: retry()
         case .available:
-            if let release = currentRelease { startStaging(release, visibleFailure: true) }
+            if let release = currentRelease, permits(release) { startStaging(release, visibleFailure: true) }
+            else { clearOffer(); checkNow() }
         case .idle, .updating: break
         }
     }
@@ -340,6 +409,7 @@ public final class AppUpdater {
     public func restartToUpdate() {
         if pendingRelaunch?.helper != nil { Self.requestQuit(); return }
         guard case let .ready(version) = state, let prepared = held, applyTask == nil else { return }
+        guard permits(prepared.release) else { clearOffer(); checkNow(); return }
         // The host got busy since the download finished: stay ready and try again on the next click.
         if let reason = configuration.busyReason() { Self.log.info("restart held back: \(reason, privacy: .public)"); return }
         held = nil
@@ -358,11 +428,33 @@ public final class AppUpdater {
         }
     }
 
+    /// Call immediately before returning `.terminateNow` for a normal, user-requested quit.
+    /// The host must already have completed its busy checks and saves. A successful swap
+    /// keeps the app closed and preserves the previous build until the next healthy launch.
+    @discardableResult
+    public func applyOnQuitIfReady() -> Bool {
+        guard configuration.installOnQuit(), canCheck, let prepared = held,
+              !prepared.release.isPrerelease, !ReleaseInfo.isBeta(prepared.release.version),
+              configuration.busyReason() == nil, NSApp.modalWindow == nil,
+              !NSApp.windows.contains(where: { $0.isSheet || $0.attachedSheet != nil }) else { return false }
+        held = nil
+        defer { Self.cleanUp(prepared) }
+        do {
+            _ = try swapForStartup(prepared)
+            rememberInstall(of: prepared.release)
+            return true
+        } catch {
+            Self.log.error("Install on quit failed: \(error.localizedDescription, privacy: .public)")
+            emit(.failed, prepared.release, error: error.localizedDescription)
+            return false
+        }
+    }
+
     /// Starts again after "Update failed. Retry".
     public func retry() {
         guard case .failed = state else { return }
         defaults.removeObject(forKey: Keys.failed)
-        if let release = currentRelease {
+        if let release = currentRelease, permits(release) {
             startStaging(release, visibleFailure: true)
         } else {
             state = .idle
@@ -373,21 +465,18 @@ public final class AppUpdater {
     // MARK: - Checking
 
     func check(userInitiated: Bool, trigger: Event.Trigger? = nil) async {
-        guard !checking else { return }
-        switch state {
-        case .updating, .ready: return
-        case .idle, .available, .failed: break
-        }
+        guard canCheck else { return }
         checking = true
         defer { checking = false }
         switch await evaluate(userInitiated: userInitiated) {
         case let .available(release):
             handleAvailable(release, userInitiated: userInitiated, trigger: trigger)
         case .upToDate:
+            clearOffer()
             if userInitiated { flashPill("Up to date") }
         case .failed(let reason):
             Self.log.error("update check failed: \(reason, privacy: .public)")
-            if userInitiated {
+            if userInitiated, held == nil {
                 failureVisible = true
                 state = .failed(message: reason)
             }
@@ -398,6 +487,10 @@ public final class AppUpdater {
 
     /// What a found update turns into: a quiet download, or a pill that waits for a click.
     func handleAvailable(_ release: ReleaseInfo, userInitiated: Bool, trigger: Event.Trigger?) {
+        if let held {
+            guard !ReleaseInfo.versionsMatch(held.release.version, release.version) || hasUpdatedArchive(release) else { return }
+            discardHeld()
+        }
         currentRelease = release
         rememberOffer(release)
         if userInitiated || shouldAutoInstall(release) {
@@ -424,6 +517,7 @@ public final class AppUpdater {
             defer { self.stageTask = nil }
             do {
                 self.held = try await self.stage(release, progress: { _ in })
+                self.automaticSchedule?.downloadFinished()
                 self.state = .ready(version: release.version)
             } catch is CancellationError {
                 self.state = .idle
@@ -431,7 +525,10 @@ public final class AppUpdater {
                 // Only a release that failed counts against it. A busy app, another updater or no network is just a later try.
                 if Self.countsAgainstRelease(error) { self.recordFailure(of: release.version) }
                 Self.log.error("update to \(release.version, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
-                if !self.failureVisible, (error as? UpdateInstaller.Failure)?.isDeferral == true {
+                if !self.failureVisible, !Self.countsAgainstRelease(error) {
+                    self.offeredVersions.remove(release.version)
+                    self.pendingOffer = release
+                    self.automaticSchedule?.retryAfterDownloadDeferral()
                     self.state = .idle
                 } else {
                     self.state = .failed(message: error.localizedDescription)
@@ -441,12 +538,14 @@ public final class AppUpdater {
     }
 
     /// The decision part of a check, without any UI.
-    func evaluate(userInitiated: Bool, now: Date = Date()) async -> CheckOutcome {
-        if !userInitiated, let last = defaults.object(forKey: Keys.lastCheck) as? Date,
-           now.timeIntervalSince(last) < configuration.minimumCheckInterval {
+    func evaluate(userInitiated: Bool, now: Date = Date(), minimumInterval: TimeInterval? = nil) async -> CheckOutcome {
+        let channel = configuration.channel()
+        if !userInitiated, defaults.string(forKey: Keys.lastCheckChannel) == channel.rawValue, let last = defaults.object(forKey: Keys.lastCheck) as? Date,
+           now >= last, now.timeIntervalSince(last) < (minimumInterval ?? configuration.minimumCheckInterval),
+           checkedDuringThisRun || !previousCheckFoundUpdate {
             return .tooSoon
         }
-        let beta = configuration.channel() == .beta
+        let beta = channel == .beta
         let prefix = configuration.tagPrefix.flatMap { $0.isEmpty ? nil : $0 }
         let query = prefix != nil ? "?per_page=100" : (beta ? "?per_page=20" : "/latest")
         guard configuration.repository.range(of: #"^[\w.-]+/[\w.-]+$"#, options: .regularExpression) != nil,
@@ -454,22 +553,45 @@ public final class AppUpdater {
             return .failed("Bad repository name.")
         }
         do {
-            let (data, status) = try await fetch(url)
-            let found = status == 200
-                ? (prefix != nil || beta
-                    ? ReleaseInfo.newest(inList: data, assetName: configuration.assetName, allowPrerelease: beta, tagPrefix: prefix)
-                    : ReleaseInfo.parse(data, assetName: configuration.assetName))
-                : nil
-            guard let release = found else {
-                return .failed(status == 200 ? "Couldn't read the release." : "GitHub returned status \(status).")
-            }
+            let release = try await resolveRelease(url, beta: beta, prefix: prefix)
+            guard !Task.isCancelled, configuration.channel() == channel else { return .tooSoon }
+            checkedDuringThisRun = true
+            recordStatus(latestVersion: release.version, checkedAt: now)
+            defaults.set(channel.rawValue, forKey: Keys.lastCheckChannel)
             defaults.set(now, forKey: Keys.lastCheck)
             guard ReleaseInfo.isNewer(release.version, than: configuration.currentVersion) else { return .upToDate }
             if !userInitiated, defaults.string(forKey: Keys.skipped) == release.version { return .skipped(release.version) }
             return .available(release)
         } catch {
+            if case ReleaseFetcher.Failure.limited(let reset) = error {
+                automaticSchedule?.retryAfterRateLimit(reset)
+            }
             return .failed(error.localizedDescription)
         }
+    }
+
+    private func resolveRelease(_ url: URL, beta: Bool, prefix: String?) async throws -> ReleaseInfo {
+        if !beta, let feedURL = configuration.stableFeedURL,
+           let data = try? await fetchStableFeed(feedURL),
+           let release = StableReleaseFeed.newest(data, repository: configuration.repository,
+                                                   assetName: configuration.assetName, tagPrefix: prefix) {
+            return release
+        }
+        try Task.checkCancellation()
+        let (data, status) = try await fetch(url)
+        guard status == 200 else { throw ReleaseFetcher.Failure.http(status) }
+        let release = prefix != nil || beta
+            ? ReleaseInfo.newest(inList: data, assetName: configuration.assetName, allowPrerelease: beta, tagPrefix: prefix)
+            : ReleaseInfo.parse(data, assetName: configuration.assetName)
+        guard let release else { throw ReleaseFetcher.Failure.invalidResponse }
+        return release
+    }
+
+    private var previousCheckFoundUpdate: Bool {
+        guard let data = defaults.data(forKey: Keys.status),
+              let status = try? JSONDecoder().decode(Status.self, from: data) else { return false }
+        return ReleaseInfo.isNewer(status.latestVersion, than: configuration.currentVersion)
+            && defaults.string(forKey: Keys.skipped) != status.latestVersion
     }
 
     /// A version that fails to install or to launch this many times stops installing itself and asks instead.
@@ -754,6 +876,8 @@ public final class AppUpdater {
 
     enum Keys {
         static let lastCheck = "AppUpdater.lastCheck"
+        static let lastCheckChannel = "AppUpdater.lastCheckChannel"
+        static let status = "AppUpdater.status"
         static let skipped = "AppUpdater.skippedVersion"
         static let justUpdated = "AppUpdater.justUpdated"
         static let failed = "AppUpdater.failedUpdate"
@@ -877,6 +1001,20 @@ public final class AppUpdater {
         return result
     }
 
+    private func swapForStartup(_ prepared: Prepared) throws -> (URL, UpdateStartup) {
+        let destination = configuration.appURL
+        let startup = try UpdateStartup.begin(for: destination, version: prepared.release.version)
+        do {
+            return (try UpdateInstaller.swap(destination: destination, with: prepared.staged), startup)
+        } catch {
+            let backup = UpdateInstaller.backupURL(for: destination)
+            if !FileManager.default.fileExists(atPath: backup.path) {
+                UpdateStartup.clear(for: destination)
+            }
+            throw error
+        }
+    }
+
     private func performApply(
         _ prepared: Prepared,
         status: @escaping @MainActor (String) -> Void,
@@ -898,16 +1036,11 @@ public final class AppUpdater {
         }
         try Task.checkCancellation()
         status("Installing…")
-        let backup: URL
-        do {
-            backup = try UpdateInstaller.swap(destination: destination, with: prepared.staged)
-        } catch {
-            try? FileManager.default.removeItem(at: prepared.staged)
-            throw error
-        }
+        let (backup, startup) = try swapForStartup(prepared)
         rememberInstall(of: release)
         do {
-            let helper = try UpdateInstaller.scheduleRelaunch(destination: destination, backup: backup, lease: prepared.lease)
+            let helper = try UpdateInstaller.scheduleRelaunch(destination: destination, backup: backup,
+                                                             lease: prepared.lease, startup: startup)
             pendingRelaunch = PendingRelaunch(helper: helper, destination: destination, backup: backup, lease: prepared.lease)
         } catch {
             try UpdateInstaller.rollback(destination: destination, backup: backup)

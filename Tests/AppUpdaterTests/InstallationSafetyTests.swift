@@ -103,6 +103,75 @@ final class InstallationSafetyTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: f.backup.path))
     }
 
+    func testStartupBackupSurvivesSweepUntilTheExpectedVersionAcknowledges() throws {
+        let f = try fixture()
+        let fm = FileManager.default
+        try fm.copyItem(at: f.app, to: f.backup)
+        let startup = try UpdateStartup.begin(for: f.app, version: "2.1.0")
+
+        UpdateStartup.acknowledge(for: f.app, version: "2.0.0")
+        UpdateInstaller.sweepLeftovers(for: f.app)
+        XCTAssertFalse(startup.isAcknowledged(for: f.app))
+        XCTAssertTrue(fm.fileExists(atPath: f.backup.path))
+
+        UpdateStartup.acknowledge(for: f.app, version: "2.1.0")
+        XCTAssertTrue(startup.isAcknowledged(for: f.app))
+        UpdateInstaller.sweepLeftovers(for: f.app)
+        XCTAssertFalse(fm.fileExists(atPath: f.backup.path))
+        XCTAssertNil(UpdateStartup.read(for: f.app))
+    }
+
+    func testRelaunchFailureRestoresTheBackupAndClearsTheStartupRecord() throws {
+        let f = try fixture()
+        let fm = FileManager.default
+        try fm.createDirectory(at: f.backup, withIntermediateDirectories: false)
+        try Data("old".utf8).write(to: f.backup.appending(path: "marker"))
+        let startup = try UpdateStartup.begin(for: f.app, version: "2.1.0")
+        let helper = try UpdateInstaller.scheduleRelaunch(destination: f.app, backup: f.backup,
+                                                         waitingFor: 999_999, startup: startup)
+        waitpid(helper, nil, 0)
+        XCTAssertEqual(try String(contentsOf: f.app.appending(path: "marker"), encoding: .utf8), "old")
+        XCTAssertNil(UpdateStartup.read(for: f.app))
+    }
+
+    func testRelaunchWaitsForARealStartupConfirmation() throws {
+        try verifyStartup(crashBeforeReady: false)
+    }
+
+    func testRelaunchRollsBackWhenARealProcessExitsBeforeStartupConfirmation() throws {
+        try verifyStartup(crashBeforeReady: true)
+    }
+
+    private func verifyStartup(crashBeforeReady: Bool) throws {
+        let executable = Bundle(for: Self.self).bundleURL.deletingLastPathComponent().appending(path: "QuitProbe")
+        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: executable.path), "QuitProbe not built")
+        let f = try fixture()
+        let fm = FileManager.default
+        func installProbe(at app: URL, version: String, crash: Bool) throws {
+            let contents = app.appending(path: "Contents")
+            let bin = contents.appending(path: "MacOS")
+            try fm.createDirectory(at: bin, withIntermediateDirectories: true)
+            try fm.copyItem(at: executable, to: bin.appending(path: "QuitProbe"))
+            let plist: [String: Any] = ["CFBundleIdentifier": "com.erole.AppUpdaterStartupProbe",
+                "CFBundlePackageType": "APPL", "CFBundleExecutable": "QuitProbe",
+                "CFBundleShortVersionString": version, "CFBundleVersion": "1", "LSBackgroundOnly": true,
+                "CrashBeforeReady": crash]
+            try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+                .write(to: contents.appending(path: "Info.plist"))
+        }
+        try installProbe(at: f.app, version: "2.0.0", crash: crashBeforeReady)
+        try installProbe(at: f.backup, version: "1.0.0", crash: false)
+        let startup = try UpdateStartup.begin(for: f.app, version: "2.0.0")
+        let lease = try UpdateInstaller.InstallationLock(destination: f.app)
+        let helper = try UpdateInstaller.scheduleRelaunch(destination: f.app, backup: f.backup, waitingFor: 999_999,
+                                                         lease: lease, startup: startup)
+        waitpid(helper, nil, 0)
+        let version = UpdateInstaller.bundleInfo(f.app)?["CFBundleShortVersionString"] as? String
+        XCTAssertEqual(version, crashBeforeReady ? "1.0.0" : "2.0.0")
+        XCTAssertFalse(fm.fileExists(atPath: f.backup.path))
+        XCTAssertNil(UpdateStartup.read(for: f.app))
+    }
+
     func testCancellationWhileToolRunsIsObservedBeforeReturning() async throws {
         let f = try fixture()
         let signal = f.root.appending(path: "started")

@@ -13,8 +13,6 @@ All active macOS hosts require macOS 27; adoption work must retain that minimum.
 
 Further work to evaluate:
 
-- A startup health acknowledgement before deleting the backup. Currently the helper confirms LaunchServices accepted
-  `open`, then waits two seconds; it cannot detect a crash after launch was accepted.
 - CI runs the offline suite on the macOS 27 `xcode-27` image. Live download verification remains opt-in.
 
 Stable release checks now tolerate exhausted shared-network GitHub API quotas via verified public web discovery. Fetch adopts a compatibility backport on its e1f5004 pin; other hosts receive this change when they update their pins.
@@ -22,3 +20,9 @@ Stable release checks now tolerate exhausted shared-network GitHub API quotas vi
 Opt-in `checkInBackground(shouldPresent:)` supports periodic host prompts without silent installation, duplicate focus changes or interruption of busy work. Hosts must adopt the new revision and own a bounded timer/activation policy.
 
 Background-prompt validation: warnings-as-errors build/test passed (107 tests, 3 optional tests skipped, no failures), including delayed busy/foreground/cancellation/channel changes, new releases while open, Later/Skip, concurrency and post-update state. Release-note scripts and diff checks passed. Offload adopts this API through its own patch release.
+
+
+The delivery work adds one shared automatic scheduler, opt-in install on ordinary quit, startup confirmation and
+rollback, local status reporting, optional cached per-app stable feeds, and a disposable signed-release verification
+tool. StatBar and Scratchpad are the initial hosts for native release acceptance. UpdateBar must route managed apps
+through their own updaters before the broader rollout.
