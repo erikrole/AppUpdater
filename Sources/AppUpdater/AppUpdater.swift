@@ -553,8 +553,9 @@ public final class AppUpdater {
             return .failed("Bad repository name.")
         }
         do {
-            let release = try await resolveRelease(url, beta: beta, prefix: prefix)
+            let release = try await resolveRelease(url, beta: beta, prefix: prefix, userInitiated: userInitiated, now: now)
             guard !Task.isCancelled, configuration.channel() == channel else { return .tooSoon }
+            guard let release else { return .failed("This Mac does not meet the minimum macOS version for the available releases.") }
             checkedDuringThisRun = true
             recordStatus(latestVersion: release.version, checkedAt: now)
             defaults.set(channel.rawValue, forKey: Keys.lastCheckChannel)
@@ -570,21 +571,39 @@ public final class AppUpdater {
         }
     }
 
-    private func resolveRelease(_ url: URL, beta: Bool, prefix: String?) async throws -> ReleaseInfo {
-        if !beta, let feedURL = configuration.stableFeedURL,
-           let data = try? await fetchStableFeed(feedURL),
-           let release = StableReleaseFeed.newest(data, repository: configuration.repository,
-                                                   assetName: configuration.assetName, tagPrefix: prefix) {
-            return release
+    private func resolveRelease(_ url: URL, beta: Bool, prefix: String?, userInitiated: Bool,
+                                now: Date) async throws -> ReleaseInfo? {
+        var cached: StableReleaseFeed.Selection?
+        if !beta, let feedURL = configuration.stableFeedURL, let data = try? await fetchStableFeed(feedURL) {
+            cached = StableReleaseFeed.select(data, repository: configuration.repository,
+                                             assetName: configuration.assetName, tagPrefix: prefix)
+        }
+        let lastAudit = defaults.object(forKey: Keys.lastStableFeedAudit) as? Date
+        if let cached, !userInitiated, let lastAudit, now >= lastAudit, now.timeIntervalSince(lastAudit) < 24 * 3600 {
+            return cached.compatible
         }
         try Task.checkCancellation()
-        let (data, status) = try await fetch(url)
-        guard status == 200 else { throw ReleaseFetcher.Failure.http(status) }
-        let release = prefix != nil || beta
-            ? ReleaseInfo.newest(inList: data, assetName: configuration.assetName, allowPrerelease: beta, tagPrefix: prefix)
-            : ReleaseInfo.parse(data, assetName: configuration.assetName)
-        guard let release else { throw ReleaseFetcher.Failure.invalidResponse }
-        return release
+        do {
+            let (data, status) = try await fetch(url)
+            guard status == 200 else { throw ReleaseFetcher.Failure.http(status) }
+            let release = prefix != nil || beta
+                ? ReleaseInfo.newest(inList: data, assetName: configuration.assetName, allowPrerelease: beta, tagPrefix: prefix)
+                : ReleaseInfo.parse(data, assetName: configuration.assetName)
+            guard let release else { throw ReleaseFetcher.Failure.invalidResponse }
+            if let cached {
+                defaults.set(now, forKey: Keys.lastStableFeedAudit)
+                // A public release newer than the entire feed may have been published just before the feed refresh.
+                if !ReleaseInfo.isNewer(release.version, than: cached.newestListed.version) {
+                    return cached.compatible
+                }
+                defaults.removeObject(forKey: Keys.lastStableFeedAudit)
+            }
+            return release
+        } catch {
+            guard let cached, !Task.isCancelled else { throw error }
+            defaults.set(now, forKey: Keys.lastStableFeedAudit)
+            return cached.compatible
+        }
     }
 
     private var previousCheckFoundUpdate: Bool {
@@ -878,6 +897,7 @@ public final class AppUpdater {
         static let lastCheck = "AppUpdater.lastCheck"
         static let lastCheckChannel = "AppUpdater.lastCheckChannel"
         static let status = "AppUpdater.status"
+        static let lastStableFeedAudit = "AppUpdater.lastStableFeedAudit"
         static let skipped = "AppUpdater.skippedVersion"
         static let justUpdated = "AppUpdater.justUpdated"
         static let failed = "AppUpdater.failedUpdate"

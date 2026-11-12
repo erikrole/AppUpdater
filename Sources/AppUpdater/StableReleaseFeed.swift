@@ -3,22 +3,28 @@ import Foundation
 /// A per-app list of public stable releases. Entries use the GitHub release shape so
 /// both discovery paths use the same asset selection and version rules.
 enum StableReleaseFeed {
-    static func newest(_ data: Data, repository: String, assetName: String, tagPrefix: String?,
-                       systemVersion: OperatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion) -> ReleaseInfo? {
+    struct Selection {
+        let compatible: ReleaseInfo?
+        let newestListed: ReleaseInfo
+    }
+
+    static func select(_ data: Data, repository: String, assetName: String, tagPrefix: String?,
+                       systemVersion: OperatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion) -> Selection? {
         guard data.count <= 512 * 1024,
               let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return nil }
         let currentOS = "\(systemVersion.majorVersion).\(systemVersion.minorVersion).\(systemVersion.patchVersion)"
-        return entries.compactMap { entry -> ReleaseInfo? in
+        let candidates = entries.compactMap { entry -> (release: ReleaseInfo, compatible: Bool)? in
             guard let minimum = entry["minimum_macos"] as? String,
                   ReleaseInfo.versionsMatch(minimum, minimum), !ReleaseInfo.isBeta(minimum),
-                  !ReleaseInfo.isNewer(minimum, than: currentOS),
                   let release = ReleaseInfo.parse(entry, assetName: assetName, allowPrerelease: false, tagPrefix: tagPrefix),
                   let tag = entry["tag_name"] as? String, release.archiveSHA256 != nil,
                   release.downloadURL.query == nil, release.downloadURL.fragment == nil,
                   release.downloadURL.pathComponents.dropFirst().dropLast().joined(separator: "/")
                     .caseInsensitiveCompare("\(repository)/releases/download/\(tag)") == .orderedSame else { return nil }
-            return release
-        }.max { ReleaseInfo.isNewer($1.version, than: $0.version) }
+            return (release, !ReleaseInfo.isNewer(minimum, than: currentOS))
+        }.sorted { ReleaseInfo.isNewer($0.release.version, than: $1.release.version) }
+        guard let latest = candidates.first else { return nil }
+        return Selection(compatible: candidates.first(where: \.compatible)?.release, newestListed: latest.release)
     }
 
     static func fetch(_ url: URL) async throws -> Data {

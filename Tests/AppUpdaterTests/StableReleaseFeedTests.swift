@@ -18,9 +18,10 @@ final class StableReleaseFeedTests: XCTestCase {
             entry("2.1.0", minimum: "26.0"),
             entry("2.0.0", minimum: "26.0"),
         ])
-        let release = StableReleaseFeed.newest(data, repository: "erikrole/releases", assetName: "Example.zip",
+        let selection = StableReleaseFeed.select(data, repository: "erikrole/releases", assetName: "Example.zip",
                                                tagPrefix: "example-", systemVersion: .init(majorVersion: 27, minorVersion: 0, patchVersion: 0))
-        XCTAssertEqual(release?.version, "2.1.0")
-        XCTAssertEqual(release?.archiveSHA256, String(repeating: "a", count: 64))
+        XCTAssertEqual(selection?.newestListed.version, "4.0.0")
+        XCTAssertEqual(selection?.compatible?.version, "2.1.0")
+        XCTAssertEqual(selection?.compatible?.archiveSHA256, String(repeating: "a", count: 64))
     }
 }
